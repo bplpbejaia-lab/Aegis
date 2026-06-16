@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aegis Autonomous Hosting & Security Analyst</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="is-pristine">
+    <div class="app-shell">
+      <header class="top-nav" aria-label="Primary">
+        <nav class="top-nav-inner">
+          <a class="brand" href="/" aria-label="Aegis home">Aegis</a>
+          <div class="nav-pills">
+            <button class="nav-action" type="button" data-nav-target="work">Work</button>
+            <button class="nav-action" id="open-report" type="button">Report</button>
+          </div>
+        </nav>
+      </header>
+
+      <main class="minimal-shell">
+        <section class="target-stage" aria-label="Target input">
+          <div class="signal-field" aria-hidden="true">
+            <span>Recon</span>
+            <span>DNS</span>
+            <span>TLS</span>
+            <span>WAF</span>
+          </div>
+
+          <h1>Introducing Aegis</h1>
+          <p class="hero-subtitle">Scan your target..</p>
+
+          <form class="target-console" id="audit-form">
+            <label class="input-label" for="target">Target URL</label>
+            <div class="input-frame">
+              <span class="input-prefix" aria-hidden="true">
+                <img src="/static/assets/aegis-fluffy-companion-256.png" alt="" />
+              </span>
+              <input
+                id="target"
+                name="target"
+                type="text"
+                inputmode="url"
+                placeholder="capmicro.dz or example.com"
+                autocomplete="url"
+                required
+              />
+              <button type="submit" id="run-button">
+                <span class="button-mark" aria-hidden="true"></span>
+                <span id="run-label">Analyze</span>
+              </button>
+            </div>
+
+            <div class="console-meta">
+              <label class="consent-row">
+                <input id="authorized" name="authorized" type="checkbox" required />
+                <span>Authorized scope</span>
+              </label>
+              <span>Kimi K2 / HF Router</span>
+            </div>
+          </form>
+
+          <div class="agent-strip">
+            <div>
+              <strong id="agent-state">Idle</strong>
+              <span id="agent-detail">Waiting for an authorized target.</span>
+            </div>
+            <span id="elapsed">0 ms</span>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <span id="progress-bar"></span>
+          </div>
+        </section>
+
+        <section class="work-board" id="work-board" aria-label="Work state">
+          <div class="work-heading">
+            <div>
+              <p class="kicker">Work state</p>
+              <h2 id="work-status">No active run</h2>
+            </div>
+            <span id="work-progress-label">0%</span>
+          </div>
+          <p id="work-detail">Scan an authorized target to see the agent tools, progress, and final handoff state.</p>
+          <button class="work-cta" type="button" data-focus-target>Scan a target</button>
+          <ol id="work-steps" class="work-steps" aria-label="Work steps">
+            <li>Waiting for scope confirmation</li>
+          </ol>
+        </section>
+
+        <section class="chat-feed" aria-label="Live thinking">
+          <ol id="trace-list" class="chat-list">
+            <li class="chat-message assistant intro-message">
+              <span class="message-avatar" aria-hidden="true">A</span>
+              <div class="message-body">
+                <p class="assistant-kicker">Aegis research agent</p>
+                <p>Submit an authorized target. Passive tools will appear here live.</p>
+              </div>
+            </li>
+          </ol>
+        </section>
+      </main>
+    </div>
+
+    <div id="report-modal" class="report-modal" hidden>
+      <div class="modal-backdrop" data-close-report></div>
+      <section class="report-dialog" role="dialog" aria-modal="true" aria-labelledby="report-title">
+        <header class="modal-header">
+          <div>
+            <p class="kicker">Passive report</p>
+            <h2 id="report-title">Aegis report</h2>
+          </div>
+          <button class="modal-close" type="button" data-close-report aria-label="Close">x</button>
+        </header>
+
+        <label class="report-search">
+          <span aria-hidden="true">Search</span>
+          <input type="search" placeholder="Search report..." />
+        </label>
+
+        <div class="modal-content">
+          <section id="report-summary" class="summary-grid" aria-label="Report summary">
+            <article class="score-card">
+              <div class="score-ring" id="score-ring" style="--score: 0">
+                <span id="score-value">--</span>
+              </div>
+              <div>
+                <p class="eyebrow">Security posture</p>
+                <h3 id="posture">Awaiting analysis</h3>
+                <p id="summary-line">The report will appear as soon as the agent finishes.</p>
+              </div>
+            </article>
+            <article class="severity-card">
+              <span class="severity critical">Critical <b id="critical-count">0</b></span>
+              <span class="severity high">High <b id="high-count">0</b></span>
+              <span class="severity medium">Medium <b id="medium-count">0</b></span>
+              <span class="severity low">Low <b id="low-count">0</b></span>
+            </article>
+          </section>
+
+          <section class="modal-section">
+            <div class="section-heading">
+              <h3>Facts</h3>
+              <span>Passive evidence</span>
+            </div>
+            <div class="facts-panel" id="facts-panel">
+              <p class="panel-placeholder">DNS, HTTP, TLS, and page facts will land here.</p>
+            </div>
+          </section>
+
+          <section class="modal-section">
+            <div class="section-heading">
+              <h3>Security findings</h3>
+              <span>Classified issues</span>
+            </div>
+            <div id="findings-list" class="finding-list scroll-area">
+              <p class="panel-placeholder">No findings yet.</p>
+            </div>
+          </section>
+
+          <section class="modal-section">
+            <div class="section-heading">
+              <h3>Recommended architecture</h3>
+              <span>Hosting and edge hardening</span>
+            </div>
+            <div id="hosting-list" class="hosting-list scroll-area">
+              <p class="panel-placeholder">Recommendations will be generated after analysis.</p>
+            </div>
+          </section>
+
+          <section class="modal-section">
+            <div class="section-heading">
+              <h3>Structured synthesis</h3>
+              <span>LLM output</span>
+            </div>
+            <pre id="llm-output">The model response will appear here.</pre>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
