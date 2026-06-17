@@ -199,7 +199,7 @@ function resetRun(target) {
   findingsList.innerHTML = '<p class="panel-placeholder">No findings yet.</p>';
   hostingList.innerHTML =
     '<p class="panel-placeholder">Recommendations will be generated after analysis.</p>';
-  llmOutput.textContent = "Waiting for LLM synthesis.";
+  llmOutput.textContent = "Waiting for structured synthesis.";
   renderMetrics({
     score: 0,
     posture: "Running",
@@ -224,6 +224,7 @@ function renderStep(step) {
         <p class="thinking-label">Using <span class="tool-name"></span></p>
         <p class="step-title"></p>
         <p class="trace-detail"></p>
+        <p class="step-preview" hidden></p>
       </div>
     `;
     traceItems.set(step.id, item);
@@ -235,6 +236,10 @@ function renderStep(step) {
   item.querySelector(".step-title").textContent = step.title;
   item.querySelector(".tool-name").textContent = step.tool;
   item.querySelector(".trace-detail").textContent = step.detail;
+  const preview = item.querySelector(".step-preview");
+  const previewText = step.result?.preview || "";
+  preview.hidden = !previewText;
+  preview.textContent = previewText ? `Sub-result: ${previewText}` : "";
   scrollChatToBottom();
 }
 

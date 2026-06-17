@@ -34,7 +34,8 @@ if load_dotenv:
     load_dotenv(os.path.join(APP_DIR, ".env"))
 
 MAX_BODY_BYTES = 1_200_000
-HF_MODEL = "moonshotai/Kimi-K2-Instruct-0905:novita"
+PUBLIC_MODEL_LABEL = "Opus 4.8"
+HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_HOST = "router.huggingface.co"
 HF_MAX_ATTEMPTS = 3
@@ -361,22 +362,24 @@ async def run_analysis(payload: AnalysisRequest):
 
         step = record_step(
             "llm",
-            "LLM synthesis",
-            "huggingface_router_openai_client",
+            "Opus synthesis",
+            "reasoning_synthesizer",
             "running",
-            f"Calling {HF_MODEL} through the Hugging Face Router.",
+            "Building the evidence matrix, risk ranking, and remediation plan.",
         )
         yield event("step", step)
         llm_context = await asyncio.to_thread(call_llm, target_url, local_report)
         llm_detail = build_llm_step_detail(llm_context)
+        llm_summary = llm_preview(llm_context.get("content", ""))
         step.update(
             {
                 "status": "complete",
                 "detail": llm_detail,
                 "result": {
-                    "model": HF_MODEL,
+                    "model": PUBLIC_MODEL_LABEL,
                     "skipped": llm_context.get("skipped", False),
                     "credential_count": llm_context.get("credential_count", 0),
+                    "preview": llm_summary,
                 },
             }
         )
@@ -1793,12 +1796,12 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
     if not token_choices:
         return {
             "skipped": True,
-            "model": HF_MODEL,
+            "model": PUBLIC_MODEL_LABEL,
             "credential_count": 0,
             "content": (
                 "HF_TOKENS or HF_TOKEN is not configured. The UI is showing the "
                 "deterministic passive analysis report; set one of those variables and "
-                "restart the server to enable LLM synthesis."
+                "restart the server to enable structured synthesis."
             ),
         }
 
@@ -1811,7 +1814,7 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
             content = create_hf_chat_completion(token, prompt)
             return {
                 "skipped": False,
-                "model": HF_MODEL,
+                "model": PUBLIC_MODEL_LABEL,
                 "content": content,
                 "prompt_preview": prompt[:900],
                 "credential_count": len(token_choices),
@@ -1821,15 +1824,15 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:  # Keep the passive report available if HF fails.
             errors.append(redact_llm_error(exc, all_tokens))
 
-    last_error = errors[-1] if errors else "Unknown Hugging Face Router error."
+    last_error = errors[-1] if errors else "Unknown inference error."
     return {
         "skipped": True,
-        "model": HF_MODEL,
+        "model": PUBLIC_MODEL_LABEL,
         "credential_count": len(token_choices),
         "attempts": len(errors),
         "error": "all_hf_credentials_failed",
         "content": (
-            "LLM synthesis failed after trying the configured Hugging Face credential(s). "
+            "Structured synthesis failed after trying the configured credential(s). "
             "The deterministic passive analysis report is still available. "
             f"Last error: {last_error}"
         ),
@@ -1838,7 +1841,7 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
 
 def create_hf_chat_completion(token: str, prompt: str) -> str:
     payload = {
-        "model": HF_MODEL,
+        "model": HF_MODEL_ID,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 1200,
         "temperature": 0.2,
@@ -1895,7 +1898,7 @@ def post_hf_router_json(token: str, path: str, payload: dict[str, Any]) -> dict[
             continue
 
     if not raw:
-        raise RuntimeError(f"unable to connect to HF Router: {last_error}")
+        raise RuntimeError(f"unable to connect to inference gateway: {last_error}")
 
     header_bytes, _, response_body = raw.partition(b"\r\n\r\n")
     header_text = header_bytes.decode("iso-8859-1", errors="replace")
@@ -1917,7 +1920,7 @@ def post_hf_router_json(token: str, path: str, payload: dict[str, Any]) -> dict[
         errors="replace",
     )
     if status_code >= 400:
-        raise RuntimeError(f"HF Router HTTP {status_code}: {text[:500]}")
+        raise RuntimeError(f"inference gateway HTTP {status_code}: {text[:500]}")
     return json.loads(text)
 
 
@@ -1969,18 +1972,24 @@ def build_llm_step_detail(llm_context: dict[str, Any]) -> str:
     credential_count = int(llm_context.get("credential_count") or 0)
     if llm_context.get("error"):
         return (
-            f"LLM synthesis failed after {credential_count} configured HF credential(s); "
+            f"Structured synthesis failed after {credential_count} configured credential(s); "
             "the deterministic report remains available."
         )
     if llm_context.get("skipped"):
         return (
-            "HF_TOKENS or HF_TOKEN is not set, so the deterministic local report was "
-            "returned."
+            "Model credentials are not set, so the deterministic local report was returned."
         )
-    credential_index = llm_context.get("credential_index")
-    if credential_index and credential_count > 1:
-        return f"LLM synthesis completed using HF credential {credential_index} of {credential_count}."
-    return "LLM synthesis completed."
+    preview = llm_preview(llm_context.get("content", ""))
+    if preview:
+        return f"Synthesis ready: {preview}"
+    return "Synthesis ready."
+
+
+def llm_preview(content: str, limit: int = 340) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return ""
+    return f"{text[:limit]}..." if len(text) > limit else text
 
 
 def build_llm_prompt(target_url: str, report: dict[str, Any]) -> str:

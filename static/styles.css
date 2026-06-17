@@ -620,6 +620,14 @@ button {
   color: var(--muted);
 }
 
+.step-preview {
+  margin-top: 8px;
+  border-left: 2px solid rgba(31, 109, 104, 0.34);
+  color: var(--ink);
+  padding-left: 10px;
+  font-size: 12px;
+}
+
 .tool-name {
   color: var(--accent);
 }
