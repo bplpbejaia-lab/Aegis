@@ -47,7 +47,7 @@ LOCAL_BRIDGE_DIR = os.getenv(
     "AEGIS_LOCAL_BRIDGE_DIR",
     os.path.join(APP_DIR, ".aegis-local-llm"),
 )
-LOCAL_BRIDGE_TIMEOUT_SECONDS = int(os.getenv("AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS", "900"))
+LOCAL_BRIDGE_TIMEOUT_SECONDS = int(os.getenv("AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS", "1800"))
 DOH_ENDPOINTS = [
     ("https://8.8.8.8/resolve", {}),
     ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
@@ -2096,6 +2096,9 @@ def build_llm_prompt(target_url: str, report: dict[str, Any]) -> str:
     return (
         f"{LLM_BASE_PROMPT}\n\n"
         f'Website given by the user: "{target_url}"\n\n'
+        "Think thoroughly before answering. Use full security-analysis effort, especially "
+        "for possible critical and high-impact paths, but keep the final report precise "
+        "and not chatty.\n\n"
         "Use only the passive observations below. Do not invent exploit success, "
         "credentials, malware, internal access, SSH/UFW/MySQL state, filesystem permissions, "
         "backups, plugin CVEs, MFA, or lockout status unless they are directly present in "
@@ -2103,12 +2106,25 @@ def build_llm_prompt(target_url: str, report: dict[str, Any]) -> str:
         "hosting status, OS/package versions, or quantitative risk-reduction percentages. MX "
         "records are mail-routing evidence only, not web-hosting evidence. If wordpress.components."
         "core_version is empty, say 'WordPress core version not observed'. When a point is not "
-        "externally observable, put it in Research Notes as 'requires authenticated/server-side "
-        "validation'. Be specific and evidence driven. Use compact bullets and include the observed "
-        "URL/status/header/path for each finding when available. Structure the answer with these exact sections: "
-        "Executive Summary, Evidence Matrix, Critical Findings, High Findings, Medium Findings, "
-        "Low Findings, WordPress Attack Surface, DNS TLS Header Review, Cloudways Cloudflare "
-        "Hardening Plan, Prioritized Remediation Plan, Research Notes.\n\n"
+        "externally observable, label it 'requires authenticated/server-side validation'. "
+        "Never upgrade a finding to critical or high unless the evidence supports that severity. "
+        "If no critical or high issue is observable, say that clearly.\n\n"
+        "Output format: concise pentest report, maximum 1400 words. No long intro. Use these "
+        "sections exactly:\n"
+        "1. Risk Snapshot - one paragraph with score, posture, and whether critical/high issues "
+        "were observed.\n"
+        "2. Critical / High Findings - only confirmed or strongly evidenced critical/high items. "
+        "For each item use: Vulnerability, Evidence, How it could be used, Impact, Fix.\n"
+        "3. Medium Findings - compact bullets. For each: vulnerability, observed evidence, "
+        "realistic abuse path, fix.\n"
+        "4. Low Findings - compact bullets with evidence and fix.\n"
+        "5. WordPress Surface - mention only observed WordPress signals and what an attacker "
+        "could realistically test next without claiming success.\n"
+        "6. Priority Fix Plan - ordered checklist, highest risk first.\n"
+        "7. Validation Notes - what still needs authenticated/server-side validation.\n\n"
+        "For 'How it could be used', describe realistic attacker usage at a defensive level. "
+        "Do not provide exploit payloads, credential attacks, destructive steps, or instructions "
+        "to bypass controls.\n\n"
         "Passive observations JSON:\n"
         f"{json.dumps(compact_report, indent=2)}"
     )

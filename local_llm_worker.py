@@ -118,24 +118,27 @@ def run_provider(job: dict[str, Any], job_path: Path) -> tuple[str, str]:
 
 def run_codex(prompt: str, job_path: Path) -> str:
     command = shlex.split(
-        os.getenv("AEGIS_CODEX_COMMAND", "codex"),
+        os.getenv("AEGIS_CODEX_COMMAND", default_codex_command()),
         posix=os.name != "nt",
     )
     args = shlex.split(
-        os.getenv("AEGIS_CODEX_ARGS", "exec"),
+        os.getenv("AEGIS_CODEX_ARGS", default_codex_args()),
         posix=os.name != "nt",
     )
-    timeout = float(os.getenv("AEGIS_CODEX_TIMEOUT_SECONDS", "900"))
+    timeout = float(os.getenv("AEGIS_CODEX_TIMEOUT_SECONDS", "1800"))
     prompt_mode = os.getenv("AEGIS_CODEX_PROMPT_MODE", "stdin").strip().lower()
     prompt_path = job_path.with_suffix(".prompt.txt")
+    output_path = job_path.with_suffix(".codex-output.txt")
 
     if prompt_mode == "file":
         prompt_path.write_text(prompt, encoding="utf-8")
 
     replacements = {
         "{job_file}": str(job_path),
+        "{output_file}": str(output_path),
         "{prompt_file}": str(prompt_path),
         "{prompt}": prompt,
+        "{workspace}": str(APP_DIR),
     }
     argv = [replace_tokens(part, replacements) for part in command + args]
     if prompt_mode == "arg" and "{prompt}" not in " ".join(command + args):
@@ -155,7 +158,29 @@ def run_codex(prompt: str, job_path: Path) -> str:
     if completed.returncode != 0:
         detail = stderr or stdout or f"exit code {completed.returncode}"
         raise RuntimeError(f"Codex command failed: {detail}")
+    if output_path.exists():
+        content = output_path.read_text(encoding="utf-8").strip()
+        if content:
+            return content
     return stdout or stderr
+
+
+def default_codex_command() -> str:
+    local_cmd = APP_DIR / ".aegis-codex-cli" / "node_modules" / ".bin" / "codex.cmd"
+    local_bin = APP_DIR / ".aegis-codex-cli" / "node_modules" / ".bin" / "codex"
+    if os.name == "nt" and local_cmd.exists():
+        return str(local_cmd)
+    if local_bin.exists():
+        return str(local_bin)
+    return "codex"
+
+
+def default_codex_args() -> str:
+    return (
+        "--ask-for-approval never exec --sandbox read-only --ephemeral "
+        "-c model=gpt-5.5 -c model_reasoning_effort=xhigh "
+        "-C {workspace} --output-last-message {output_file} -"
+    )
 
 
 def run_openai(prompt: str) -> str:
@@ -192,7 +217,7 @@ def replace_tokens(value: str, replacements: dict[str, str]) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def write_result(path: Path, payload: dict[str, Any]) -> None:

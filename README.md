@@ -18,6 +18,9 @@ Open http://127.0.0.1:8000.
 To route the synthesis step through a local worker instead of the HF/Kimi flow:
 
 ```powershell
+# one-time local Codex CLI install, avoids WindowsApps execution errors
+D:\npm.cmd install --prefix .\.aegis-codex-cli --no-audit --fund=false @openai/codex@0.141.0
+
 # terminal 1
 $env:AEGIS_LLM_PROVIDER="local_bridge"
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
@@ -27,9 +30,12 @@ $env:AEGIS_LOCAL_WORKER_PROVIDER="codex"
 python .\local_llm_worker.py
 ```
 
-If the local Codex CLI cannot be launched from scripts on this machine, use
-`AEGIS_LOCAL_WORKER_PROVIDER=openai` with `OPENAI_API_KEY`, or `echo` for a
-queue smoke test.
+The worker prefers `.\.aegis-codex-cli\node_modules\.bin\codex.cmd` when it
+exists. The default Codex worker keeps `model=gpt-5.5` and
+`model_reasoning_effort=xhigh`; the prompt only constrains the final report to
+be precise instead of verbose. If Codex cannot be launched from scripts on this
+machine, use `AEGIS_LOCAL_WORKER_PROVIDER=openai` with `OPENAI_API_KEY`, or
+`echo` for a queue smoke test.
 
 ## Notes
 
