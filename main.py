@@ -36,6 +36,7 @@ if load_dotenv:
 
 MAX_BODY_BYTES = 1_200_000
 PUBLIC_MODEL_LABEL = "Opus 4.8"
+ANALYSIS_MODE = os.getenv("AEGIS_ANALYSIS_MODE", "passive").strip().lower()
 HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_HOST = "router.huggingface.co"
@@ -234,6 +235,41 @@ async def run_analysis(payload: AnalysisRequest):
             }
         )
         yield event("step", step)
+
+        if ANALYSIS_MODE in {"codex_direct", "direct_codex", "direct"}:
+            step = record_step(
+                "codex_direct",
+                "Codex direct pentest",
+                "codex_cli",
+                "running",
+                "Passing the authorized target directly to local Codex for end-to-end analysis.",
+            )
+            yield event("step", step)
+            llm_context = await asyncio.to_thread(call_codex_direct_pentest, target_url)
+            step.update(
+                {
+                    "status": "complete",
+                    "detail": build_llm_step_detail(llm_context),
+                    "result": {
+                        "model": llm_context.get("model", "Local Codex CLI"),
+                        "skipped": llm_context.get("skipped", False),
+                        "preview": llm_preview(llm_context.get("content", "")),
+                    },
+                }
+            )
+            yield event("step", step)
+
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            direct_report = build_codex_direct_report(
+                target_url,
+                llm_context,
+                steps,
+                elapsed_ms,
+            )
+            yield event("metrics", direct_report["summary"])
+            yield event("report", direct_report)
+            yield event("done", {"duration_ms": elapsed_ms})
+            return
 
         step = record_step(
             "dns",
@@ -1851,6 +1887,10 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
 
 def call_local_bridge(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
     prompt = build_llm_prompt(target_url, report)
+    return call_local_bridge_prompt(target_url, prompt)
+
+
+def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
     job_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex}"
     pending_dir = os.path.join(LOCAL_BRIDGE_DIR, "pending")
     done_dir = os.path.join(LOCAL_BRIDGE_DIR, "done")
@@ -1921,6 +1961,106 @@ def call_local_bridge(target_url: str, report: dict[str, Any]) -> dict[str, Any]
         "error": "local_bridge_timeout",
         "bridge_job_id": job_id,
     }
+
+
+def call_codex_direct_pentest(target_url: str) -> dict[str, Any]:
+    prompt = build_codex_direct_pentest_prompt(target_url)
+    result = call_local_bridge_prompt(target_url, prompt)
+    result["analysis_mode"] = "codex_direct"
+    return result
+
+
+def build_codex_direct_report(
+    target_url: str,
+    llm_context: dict[str, Any],
+    steps: list[dict[str, Any]],
+    elapsed_ms: int,
+) -> dict[str, Any]:
+    return {
+        "target": target_url,
+        "final_url": target_url,
+        "score": 0,
+        "posture": "Codex direct pentest",
+        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "summary": {
+            "score": 0,
+            "posture": "Codex direct pentest",
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "final_url": target_url,
+            "status_code": "direct",
+        },
+        "http": {"status_code": "direct", "reason_phrase": "Codex CLI", "headers": {}},
+        "tls": {"enabled": False, "skipped": True},
+        "network": {"hostname": urlparse(target_url).hostname or "", "ips": []},
+        "dns_records": {},
+        "wordpress": {"detected": False, "components": {}},
+        "surface": {"analysis_mode": "codex_direct"},
+        "page": {
+            "title": "Codex direct pentest",
+            "forms_count": 0,
+            "password_inputs": 0,
+            "scripts_count": 0,
+            "stylesheets_count": 0,
+            "images_count": 0,
+            "external_hosts": [],
+            "mixed_content": [],
+        },
+        "technologies": ["Codex direct analysis"],
+        "vulnerabilities": [],
+        "hosting_recommendations": [],
+        "llm": llm_context,
+        "steps": steps,
+        "duration_ms": elapsed_ms,
+    }
+
+
+def build_codex_direct_pentest_prompt(target_url: str) -> str:
+    return (
+        "You are running as local Codex CLI for Aegis. The user explicitly requested an "
+        "authorized security assessment of this target, and the Aegis UI authorization "
+        "checkbox was required before this job was created.\n\n"
+        f"Target scope: {target_url}\n\n"
+        "Do the assessment end-to-end yourself. Do not rely on any precomputed backend "
+        "collector output; the backend only passed you the target. Use local command-line "
+        "tools and safe scripts available in this environment to gather evidence.\n\n"
+        "Rules of engagement:\n"
+        "- Stay in the exact target origin and directly related same-site public resources.\n"
+        "- Use non-destructive authorized testing only: DNS, TLS, HTTP(S), headers, robots, "
+        "sitemap, same-origin crawl, static source inspection, JavaScript endpoint discovery, "
+        "CMS fingerprinting, safe GET/HEAD/OPTIONS requests, public metadata, public files, "
+        "and version/CVE correlation when versions are actually observed.\n"
+        "- Do not brute force credentials, bypass authentication, exploit RCE/SQLi/XSS, upload "
+        "files, mutate state, run destructive checks, cause denial of service, spam requests, "
+        "or exfiltrate private data.\n"
+        "- If a possible issue needs authenticated, server-side, or intrusive validation, mark "
+        "it clearly as requiring validation instead of claiming exploitation.\n\n"
+        "Testing depth expected:\n"
+        "- Inspect the homepage and crawl same-origin links respectfully.\n"
+        "- Inspect HTML, forms, comments, script/style URLs, inline scripts, and public JS files.\n"
+        "- Search for exposed admin/login/CMS surfaces, API routes, backup/config/log artifacts, "
+        "directory listing, upload paths, debug endpoints, robots/sitemap leaks, security headers, "
+        "cookies, CORS, mixed content, third-party assets, and weak TLS/DNS posture.\n"
+        "- For WordPress or another CMS, fingerprint core/plugin/theme/version signals where "
+        "publicly visible, check safe public endpoints such as wp-json, xmlrpc, wp-login behavior, "
+        "readme/license/install artifacts, uploads listing, user enumeration signals, and exposed "
+        "debug/backup files.\n"
+        "- Prioritize critical and high-impact vulnerabilities. If you find none, say none were "
+        "confirmed, but still list suspected paths and what proof is missing.\n\n"
+        "Final output requirements:\n"
+        "- Do not artificially limit the report length. Show the full useful report on the site.\n"
+        "- Be precise, evidence-driven, and practical.\n"
+        "- Start with an executive risk summary.\n"
+        "- Then list Critical, High, Medium, and Low findings in that order.\n"
+        "- For every finding include: Vulnerability, Severity, Evidence with URL/status/header/path, "
+        "How someone could use it at a defensive high level, Impact, Fix, and Confidence.\n"
+        "- Include a Tested Paths / Evidence Log section listing the important URLs and checks you ran.\n"
+        "- Include False Positives / Needs Validation for anything not fully proven.\n"
+        "- Include a prioritized remediation plan.\n"
+        "- Do not hide findings just because they are numerous."
+    )
 
 
 def create_hf_chat_completion(token: str, prompt: str) -> str:

@@ -693,8 +693,8 @@ button {
   z-index: 1;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  width: min(800px, calc(100vw - 44px));
-  height: min(620px, calc(100vh - 44px));
+  width: min(1040px, calc(100vw - 44px));
+  height: min(820px, calc(100vh - 44px));
   overflow: hidden;
   border-radius: 12px;
   background: var(--surface);
@@ -985,9 +985,10 @@ button {
 }
 
 #llm-output {
-  max-height: 260px;
+  min-height: 420px;
+  max-height: none;
   margin: 0;
-  overflow: auto;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface-soft);

@@ -287,12 +287,29 @@ function renderReport(report) {
   currentReport = report;
   setReportNavReady(true);
   renderMetrics(report.summary);
-  renderFacts(report);
-  renderFindings(report.vulnerabilities || []);
-  renderHosting(report.hosting_recommendations || []);
+  if (report.surface?.analysis_mode === "codex_direct") {
+    renderCodexDirectPanels(report);
+  } else {
+    renderFacts(report);
+    renderFindings(report.vulnerabilities || []);
+    renderHosting(report.hosting_recommendations || []);
+  }
   llmOutput.textContent = report.llm?.content || "No LLM content returned.";
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
+}
+
+function renderCodexDirectPanels(report) {
+  factsPanel.innerHTML = `
+    <div class="fact"><span>Target</span><strong>${escapeHtml(report.final_url || report.target || "")}</strong></div>
+    <div class="fact"><span>Mode</span><strong>Codex direct pentest</strong></div>
+    <div class="fact"><span>Engine</span><strong>${escapeHtml(report.llm?.model || "Local Codex CLI")}</strong></div>
+    <div class="fact"><span>Job</span><strong>${escapeHtml(report.llm?.bridge_job_id || "local")}</strong></div>
+  `;
+  findingsList.innerHTML =
+    '<p class="panel-placeholder">Findings are generated end-to-end by Codex in the full report below.</p>';
+  hostingList.innerHTML =
+    '<p class="panel-placeholder">Remediation and architecture recommendations are included in the full Codex report.</p>';
 }
 
 function renderEmptyReport() {

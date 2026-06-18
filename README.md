@@ -22,6 +22,7 @@ To route the synthesis step through a local worker instead of the HF/Kimi flow:
 D:\npm.cmd install --prefix .\.aegis-codex-cli --no-audit --fund=false @openai/codex@0.141.0
 
 # terminal 1
+$env:AEGIS_ANALYSIS_MODE="codex_direct"
 $env:AEGIS_LLM_PROVIDER="local_bridge"
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
@@ -36,6 +37,10 @@ exists. The default Codex worker keeps `model=gpt-5.5` and
 be precise instead of verbose. If Codex cannot be launched from scripts on this
 machine, use `AEGIS_LOCAL_WORKER_PROVIDER=openai` with `OPENAI_API_KEY`, or
 `echo` for a queue smoke test.
+
+With `AEGIS_ANALYSIS_MODE=codex_direct`, the backend bypasses the passive
+collector and sends only the authorized target to Codex CLI. Codex performs the
+end-to-end recon and writes the full report shown in the UI.
 
 ## Notes
 
