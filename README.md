@@ -13,6 +13,24 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
 Open http://127.0.0.1:8000.
 
+## Experimental local bridge
+
+To route the synthesis step through a local worker instead of the HF/Kimi flow:
+
+```powershell
+# terminal 1
+$env:AEGIS_LLM_PROVIDER="local_bridge"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+# terminal 2
+$env:AEGIS_LOCAL_WORKER_PROVIDER="codex"
+python .\local_llm_worker.py
+```
+
+If the local Codex CLI cannot be launched from scripts on this machine, use
+`AEGIS_LOCAL_WORKER_PROVIDER=openai` with `OPENAI_API_KEY`, or `echo` for a
+queue smoke test.
+
 ## Notes
 
 - The app labels the synthesis engine as `Opus 4.8` in the UI. The provider model can be overridden with `HF_MODEL_ID` when needed.

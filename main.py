@@ -10,6 +10,7 @@ import socket
 import ssl
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
@@ -41,6 +42,12 @@ HF_ROUTER_HOST = "router.huggingface.co"
 HF_MAX_ATTEMPTS = 3
 HF_TOKEN_LOCK = threading.Lock()
 HF_TOKEN_CURSOR = 0
+LLM_PROVIDER = os.getenv("AEGIS_LLM_PROVIDER", "hf").strip().lower()
+LOCAL_BRIDGE_DIR = os.getenv(
+    "AEGIS_LOCAL_BRIDGE_DIR",
+    os.path.join(APP_DIR, ".aegis-local-llm"),
+)
+LOCAL_BRIDGE_TIMEOUT_SECONDS = int(os.getenv("AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS", "900"))
 DOH_ENDPOINTS = [
     ("https://8.8.8.8/resolve", {}),
     ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
@@ -1792,6 +1799,9 @@ def public_header_subset(headers: dict[str, str]) -> dict[str, str]:
 
 
 def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
+    if LLM_PROVIDER in {"local", "local_bridge", "codex"}:
+        return call_local_bridge(target_url, report)
+
     token_choices = rotated_hf_tokens()
     if not token_choices:
         return {
@@ -1836,6 +1846,80 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
             "The deterministic passive analysis report is still available. "
             f"Last error: {last_error}"
         ),
+    }
+
+
+def call_local_bridge(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
+    prompt = build_llm_prompt(target_url, report)
+    job_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex}"
+    pending_dir = os.path.join(LOCAL_BRIDGE_DIR, "pending")
+    done_dir = os.path.join(LOCAL_BRIDGE_DIR, "done")
+    failed_dir = os.path.join(LOCAL_BRIDGE_DIR, "failed")
+    for directory in (pending_dir, done_dir, failed_dir):
+        os.makedirs(directory, exist_ok=True)
+
+    pending_path = os.path.join(pending_dir, f"{job_id}.json")
+    pending_tmp_path = f"{pending_path}.tmp"
+    done_path = os.path.join(done_dir, f"{job_id}.json")
+    failed_path = os.path.join(failed_dir, f"{job_id}.json")
+    job = {
+        "id": job_id,
+        "target_url": target_url,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "prompt": prompt,
+    }
+    with open(pending_tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(job, handle, ensure_ascii=False, indent=2)
+    os.replace(pending_tmp_path, pending_path)
+
+    deadline = time.monotonic() + LOCAL_BRIDGE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if os.path.exists(done_path):
+            with open(done_path, "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+            return {
+                "skipped": False,
+                "model": result.get("model") or "Local Codex bridge",
+                "content": result.get("content", ""),
+                "prompt_preview": prompt[:900],
+                "credential_count": 1,
+                "attempts": int(result.get("attempts") or 1),
+                "bridge_job_id": job_id,
+                "bridge_provider": result.get("provider", "local"),
+            }
+        if os.path.exists(failed_path):
+            with open(failed_path, "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+            error = str(result.get("error") or "Local bridge worker failed.")
+            return {
+                "skipped": True,
+                "model": result.get("model") or "Local Codex bridge",
+                "content": (
+                    "Local Codex bridge failed. The deterministic passive analysis "
+                    f"report is still available. Error: {error}"
+                ),
+                "prompt_preview": prompt[:900],
+                "credential_count": 1,
+                "attempts": int(result.get("attempts") or 1),
+                "error": "local_bridge_failed",
+                "bridge_job_id": job_id,
+                "bridge_provider": result.get("provider", "local"),
+            }
+        time.sleep(0.5)
+
+    return {
+        "skipped": True,
+        "model": "Local Codex bridge",
+        "content": (
+            "Local Codex bridge timed out while waiting for the worker. The "
+            "deterministic passive analysis report is still available. Start "
+            "local_llm_worker.py and retry, or increase AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS."
+        ),
+        "prompt_preview": prompt[:900],
+        "credential_count": 1,
+        "attempts": 0,
+        "error": "local_bridge_timeout",
+        "bridge_job_id": job_id,
     }
 
 
