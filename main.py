@@ -35,7 +35,7 @@ if load_dotenv:
     load_dotenv(os.path.join(APP_DIR, ".env"))
 
 MAX_BODY_BYTES = 1_200_000
-PUBLIC_MODEL_LABEL = "Opus 4.8"
+PUBLIC_MODEL_LABEL = "Kimi"
 ANALYSIS_MODE = os.getenv("AEGIS_ANALYSIS_MODE", "passive").strip().lower()
 HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
@@ -64,6 +64,7 @@ LLM_BASE_PROMPT = (
 class AnalysisRequest(BaseModel):
     target: str = Field(..., min_length=3, max_length=2048)
     authorized: bool = False
+    engine: str = "aegis"
 
 
 class PageParser(HTMLParser):
@@ -227,31 +228,47 @@ async def run_analysis(payload: AnalysisRequest):
         )
         yield event("step", step)
         target_url = await asyncio.to_thread(normalize_target, payload.target)
+        selected_engine = normalize_analysis_engine(payload.engine)
         step.update(
             {
                 "status": "complete",
                 "detail": f"Target accepted as {target_url}.",
-                "result": {"target_url": target_url},
+                "result": {"target_url": target_url, "engine": selected_engine},
             }
         )
         yield event("step", step)
 
-        if ANALYSIS_MODE in {"codex_direct", "direct_codex", "direct"}:
+        if selected_engine in {"aegis", "kimi"}:
+            is_kimi = selected_engine == "kimi"
+            step_id = "kimi_direct" if is_kimi else "aegis_direct"
+            engine_title = "Kimi direct assessment" if is_kimi else "Aegis direct assessment"
+            engine_tool = "kimi_k2" if is_kimi else "aegis_engine"
+            engine_detail = (
+                "Passing the authorized target directly to Kimi for end-to-end analysis."
+                if is_kimi
+                else "Passing the authorized target directly to Aegis for end-to-end analysis."
+            )
             step = record_step(
-                "codex_direct",
-                "Codex direct pentest",
-                "codex_cli",
+                step_id,
+                engine_title,
+                engine_tool,
                 "running",
-                "Passing the authorized target directly to local Codex for end-to-end analysis.",
+                engine_detail,
             )
             yield event("step", step)
-            llm_context = await asyncio.to_thread(call_codex_direct_pentest, target_url)
+            llm_context = await asyncio.to_thread(
+                call_kimi_direct_pentest if is_kimi else call_aegis_direct_pentest,
+                target_url,
+            )
             step.update(
                 {
                     "status": "complete",
                     "detail": build_llm_step_detail(llm_context),
                     "result": {
-                        "model": llm_context.get("model", "Local Codex CLI"),
+                        "model": llm_context.get(
+                            "model",
+                            PUBLIC_MODEL_LABEL if is_kimi else "Aegis local engine",
+                        ),
                         "skipped": llm_context.get("skipped", False),
                         "preview": llm_preview(llm_context.get("content", "")),
                     },
@@ -260,11 +277,15 @@ async def run_analysis(payload: AnalysisRequest):
             yield event("step", step)
 
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-            direct_report = build_codex_direct_report(
+            direct_report = build_direct_report(
                 target_url,
                 llm_context,
                 steps,
                 elapsed_ms,
+                posture=engine_title,
+                analysis_mode=step_id,
+                technology=f"{'Kimi' if is_kimi else 'Aegis'} direct analysis",
+                reason_phrase="Kimi K2" if is_kimi else "Aegis Engine",
             )
             yield event("metrics", direct_report["summary"])
             yield event("report", direct_report)
@@ -405,7 +426,7 @@ async def run_analysis(payload: AnalysisRequest):
 
         step = record_step(
             "llm",
-            "Opus synthesis",
+            "Kimi synthesis",
             "reasoning_synthesizer",
             "running",
             "Building the evidence matrix, risk ranking, and remediation plan.",
@@ -441,6 +462,13 @@ async def run_analysis(payload: AnalysisRequest):
 
 def event(kind: str, data: dict[str, Any]) -> str:
     return json.dumps({"type": kind, "data": data}, default=str) + "\n"
+
+
+def normalize_analysis_engine(raw_engine: str) -> str:
+    engine = str(raw_engine or "aegis").strip().lower()
+    if engine in {"kimi", "hf", "huggingface", "hugging_face"}:
+        return "kimi"
+    return "aegis"
 
 
 def normalize_target(raw_target: str) -> str:
@@ -1919,7 +1947,7 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
                 result = json.load(handle)
             return {
                 "skipped": False,
-                "model": result.get("model") or "Local Codex bridge",
+                "model": result.get("model") or "Aegis local engine",
                 "content": result.get("content", ""),
                 "prompt_preview": prompt[:900],
                 "credential_count": 1,
@@ -1933,10 +1961,10 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
             error = str(result.get("error") or "Local bridge worker failed.")
             return {
                 "skipped": True,
-                "model": result.get("model") or "Local Codex bridge",
+                "model": result.get("model") or "Aegis local engine",
                 "content": (
-                    "Local Codex bridge failed. The deterministic passive analysis "
-                    f"report is still available. Error: {error}"
+                    "Aegis local engine failed. The report shell is still available. "
+                    f"Error: {error}"
                 ),
                 "prompt_preview": prompt[:900],
                 "credential_count": 1,
@@ -1949,10 +1977,10 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
 
     return {
         "skipped": True,
-        "model": "Local Codex bridge",
+        "model": "Aegis local engine",
         "content": (
-            "Local Codex bridge timed out while waiting for the worker. The "
-            "deterministic passive analysis report is still available. Start "
+            "Aegis local engine timed out while waiting for the worker. The "
+            "report shell is still available. Start "
             "local_llm_worker.py and retry, or increase AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS."
         ),
         "prompt_preview": prompt[:900],
@@ -1963,28 +1991,77 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
     }
 
 
-def call_codex_direct_pentest(target_url: str) -> dict[str, Any]:
-    prompt = build_codex_direct_pentest_prompt(target_url)
+def call_aegis_direct_pentest(target_url: str) -> dict[str, Any]:
+    prompt = build_aegis_direct_pentest_prompt(target_url)
     result = call_local_bridge_prompt(target_url, prompt)
-    result["analysis_mode"] = "codex_direct"
+    result["analysis_mode"] = "aegis_direct"
     return result
 
 
-def build_codex_direct_report(
+def call_kimi_direct_pentest(target_url: str) -> dict[str, Any]:
+    token_choices = rotated_hf_tokens()
+    if not token_choices:
+        return {
+            "skipped": True,
+            "model": PUBLIC_MODEL_LABEL,
+            "credential_count": 0,
+            "analysis_mode": "kimi_direct",
+            "content": (
+                "HF_TOKENS or HF_TOKEN is not configured. Kimi direct analysis cannot run "
+                "until a Hugging Face token is configured and the server is restarted."
+            ),
+        }
+
+    prompt = build_kimi_direct_pentest_prompt(target_url)
+    all_tokens = [token for _, token in token_choices]
+    errors: list[str] = []
+    for token_index, token in token_choices[:HF_MAX_ATTEMPTS]:
+        try:
+            content = create_hf_chat_completion(token, prompt, max_tokens=3500)
+            return {
+                "skipped": False,
+                "model": PUBLIC_MODEL_LABEL,
+                "content": content,
+                "prompt_preview": prompt[:900],
+                "credential_count": len(token_choices),
+                "credential_index": token_index + 1,
+                "attempts": len(errors) + 1,
+                "analysis_mode": "kimi_direct",
+            }
+        except Exception as exc:
+            errors.append(redact_llm_error(exc, all_tokens))
+
+    last_error = errors[-1] if errors else "Unknown inference error."
+    return {
+        "skipped": True,
+        "model": PUBLIC_MODEL_LABEL,
+        "credential_count": len(token_choices),
+        "attempts": len(errors),
+        "error": "all_hf_credentials_failed",
+        "analysis_mode": "kimi_direct",
+        "content": f"Kimi direct analysis failed after all configured credential(s). Last error: {last_error}",
+    }
+
+
+def build_direct_report(
     target_url: str,
     llm_context: dict[str, Any],
     steps: list[dict[str, Any]],
     elapsed_ms: int,
+    posture: str = "Aegis direct assessment",
+    analysis_mode: str = "aegis_direct",
+    technology: str = "Aegis direct analysis",
+    reason_phrase: str = "Aegis Engine",
 ) -> dict[str, Any]:
     return {
         "target": target_url,
         "final_url": target_url,
         "score": 0,
-        "posture": "Codex direct pentest",
+        "posture": posture,
         "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
         "summary": {
             "score": 0,
-            "posture": "Codex direct pentest",
+            "posture": posture,
             "critical": 0,
             "high": 0,
             "medium": 0,
@@ -1992,14 +2069,14 @@ def build_codex_direct_report(
             "final_url": target_url,
             "status_code": "direct",
         },
-        "http": {"status_code": "direct", "reason_phrase": "Codex CLI", "headers": {}},
+        "http": {"status_code": "direct", "reason_phrase": reason_phrase, "headers": {}},
         "tls": {"enabled": False, "skipped": True},
         "network": {"hostname": urlparse(target_url).hostname or "", "ips": []},
         "dns_records": {},
         "wordpress": {"detected": False, "components": {}},
-        "surface": {"analysis_mode": "codex_direct"},
+        "surface": {"analysis_mode": analysis_mode},
         "page": {
-            "title": "Codex direct pentest",
+            "title": posture,
             "forms_count": 0,
             "password_inputs": 0,
             "scripts_count": 0,
@@ -2008,7 +2085,7 @@ def build_codex_direct_report(
             "external_hosts": [],
             "mixed_content": [],
         },
-        "technologies": ["Codex direct analysis"],
+        "technologies": [technology],
         "vulnerabilities": [],
         "hosting_recommendations": [],
         "llm": llm_context,
@@ -2017,15 +2094,34 @@ def build_codex_direct_report(
     }
 
 
-def build_codex_direct_pentest_prompt(target_url: str) -> str:
+def build_aegis_direct_pentest_prompt(target_url: str) -> str:
+    return build_direct_pentest_prompt(
+        target_url,
+        "You are running as the Aegis local analysis engine.",
+        "Use local command-line tools and safe scripts available in this environment to gather evidence.",
+    )
+
+
+def build_kimi_direct_pentest_prompt(target_url: str) -> str:
+    return build_direct_pentest_prompt(
+        target_url,
+        "You are Kimi K2 running as the selected Aegis analysis engine.",
+        "Do not use or assume any precomputed passive collector output; the backend only passed you the target.",
+    )
+
+
+def build_direct_pentest_prompt(
+    target_url: str,
+    engine_intro: str,
+    evidence_instruction: str,
+) -> str:
     return (
-        "You are running as local Codex CLI for Aegis. The user explicitly requested an "
+        f"{engine_intro} The user explicitly requested an "
         "authorized security assessment of this target, and the Aegis UI authorization "
         "checkbox was required before this job was created.\n\n"
         f"Target scope: {target_url}\n\n"
         "Do the assessment end-to-end yourself. Do not rely on any precomputed backend "
-        "collector output; the backend only passed you the target. Use local command-line "
-        "tools and safe scripts available in this environment to gather evidence.\n\n"
+        f"collector output; the backend only passed you the target. {evidence_instruction}\n\n"
         "Rules of engagement:\n"
         "- Stay in the exact target origin and directly related same-site public resources.\n"
         "- Use non-destructive authorized testing only: DNS, TLS, HTTP(S), headers, robots, "
@@ -2063,11 +2159,11 @@ def build_codex_direct_pentest_prompt(target_url: str) -> str:
     )
 
 
-def create_hf_chat_completion(token: str, prompt: str) -> str:
+def create_hf_chat_completion(token: str, prompt: str, max_tokens: int = 1200) -> str:
     payload = {
         "model": HF_MODEL_ID,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1200,
+        "max_tokens": max_tokens,
         "temperature": 0.2,
     }
     try:

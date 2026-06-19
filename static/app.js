@@ -1,6 +1,7 @@
 const form = document.querySelector("#audit-form");
 const targetInput = document.querySelector("#target");
 const authorizedInput = document.querySelector("#authorized");
+const analysisEngineInput = document.querySelector("#analysis-engine");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
 const traceList = document.querySelector("#trace-list");
@@ -36,10 +37,17 @@ let runStartedAt = 0;
 let timer = null;
 let currentReport = null;
 
-window.addEventListener("DOMContentLoaded", () => {
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", initializeApp);
+} else {
+  initializeApp();
+}
+
+function initializeApp() {
   targetInput?.focus();
   setReportNavReady(false);
-});
+  installLocalPreviewHook();
+}
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -98,9 +106,9 @@ async function runAnalysis() {
   runButton.classList.add("is-running");
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
-  agentDetail.textContent = "Preparing passive tools.";
+  agentDetail.textContent = "Preparing Aegis tools.";
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing passive tools.";
+  workDetail.textContent = "Preparing Aegis tools.";
 
   try {
     const response = await fetch("/api/analyze", {
@@ -109,6 +117,7 @@ async function runAnalysis() {
       body: JSON.stringify({
         target,
         authorized: authorizedInput.checked,
+        engine: analysisEngineInput?.value || "aegis",
       }),
     });
 
@@ -189,7 +198,7 @@ function resetRun(target) {
       <span class="message-avatar" aria-hidden="true">A</span>
       <div class="message-body">
         <p class="assistant-kicker">Aegis research agent</p>
-        <p>Starting the live reasoning stream. Passive tools will appear here as they run.</p>
+        <p>Starting the live reasoning stream. Aegis tools will appear here as they run.</p>
       </div>
     </li>
   `;
@@ -199,7 +208,7 @@ function resetRun(target) {
   findingsList.innerHTML = '<p class="panel-placeholder">No findings yet.</p>';
   hostingList.innerHTML =
     '<p class="panel-placeholder">Recommendations will be generated after analysis.</p>';
-  llmOutput.textContent = "Waiting for structured synthesis.";
+  llmOutput.textContent = "Waiting for model output.";
   renderMetrics({
     score: 0,
     posture: "Running",
@@ -286,10 +295,12 @@ function renderMetrics(summary) {
 function renderReport(report) {
   currentReport = report;
   setReportNavReady(true);
-  renderMetrics(report.summary);
-  if (report.surface?.analysis_mode === "codex_direct") {
-    renderCodexDirectPanels(report);
+  if (isDirectReport(report)) {
+    setReportModeLabels(report);
+    renderDirectPanels(report);
   } else {
+    setReportModeLabels(null);
+    renderMetrics(report.summary);
     renderFacts(report);
     renderFindings(report.vulnerabilities || []);
     renderHosting(report.hosting_recommendations || []);
@@ -299,20 +310,375 @@ function renderReport(report) {
   filterReport("");
 }
 
-function renderCodexDirectPanels(report) {
+function renderDirectPanels(report) {
+  const rawOutput = report.llm?.content || "";
+  const parsed = parseDirectReport(rawOutput);
+  const engineName = directEngineName(report);
+  const totalFindings = parsed.findings.length;
+  const weightedScore = Math.min(
+    100,
+    parsed.counts.critical * 30 +
+      parsed.counts.high * 20 +
+      parsed.counts.medium * 9 +
+      parsed.counts.low * 4,
+  );
+
+  scoreRing.style.setProperty("--score", weightedScore);
+  scoreValue.textContent = totalFindings ? String(totalFindings) : "--";
+  criticalCount.textContent = parsed.counts.critical;
+  highCount.textContent = parsed.counts.high;
+  mediumCount.textContent = parsed.counts.medium;
+  lowCount.textContent = parsed.counts.low;
+  posture.textContent = directPostureLabel(parsed.counts, engineName);
+  summaryLine.textContent = `${totalFindings} classified finding(s) from ${engineName} direct analysis of ${
+    report.final_url || report.target || "the target"
+  }.`;
+
+  factsPanel.classList.add("direct-dashboard");
+  findingsList.classList.add("direct-findings-list");
+  hostingList.classList.add("direct-support-list");
   factsPanel.innerHTML = `
-    <div class="fact"><span>Target</span><strong>${escapeHtml(report.final_url || report.target || "")}</strong></div>
-    <div class="fact"><span>Mode</span><strong>Codex direct pentest</strong></div>
-    <div class="fact"><span>Engine</span><strong>${escapeHtml(report.llm?.model || "Local Codex CLI")}</strong></div>
-    <div class="fact"><span>Job</span><strong>${escapeHtml(report.llm?.bridge_job_id || "local")}</strong></div>
+    <article class="direct-overview-card report-searchable">
+      <span class="direct-card-label">Executive risk summary</span>
+      ${renderTextBlock(parsed.summary || `${engineName} did not return a separate executive summary.`)}
+    </article>
+    <article class="direct-chart-card report-searchable">
+      <span class="direct-card-label">Severity distribution</span>
+      ${renderSeverityBars(parsed.counts)}
+    </article>
+    <article class="direct-meta-card report-searchable">
+      <span class="direct-card-label">Run context</span>
+      <dl>
+        <div><dt>Target</dt><dd>${escapeHtml(report.final_url || report.target || "")}</dd></div>
+        <div><dt>Mode</dt><dd>${escapeHtml(engineName)} direct assessment</dd></div>
+        <div><dt>Engine</dt><dd>${escapeHtml(report.llm?.model || engineName)}</dd></div>
+        <div><dt>Duration</dt><dd>${escapeHtml(formatDuration(report.duration_ms))}</dd></div>
+      </dl>
+    </article>
   `;
-  findingsList.innerHTML =
-    '<p class="panel-placeholder">Findings are generated end-to-end by Codex in the full report below.</p>';
-  hostingList.innerHTML =
-    '<p class="panel-placeholder">Remediation and architecture recommendations are included in the full Codex report.</p>';
+  findingsList.innerHTML = renderDirectFindings(parsed, engineName);
+  hostingList.innerHTML = renderDirectSupportSections(parsed);
+}
+
+function setReportModeLabels(report) {
+  const sections = reportModal?.querySelectorAll(".modal-section") || [];
+  const kicker = reportModal?.querySelector(".modal-header .kicker");
+  const isDirect = Boolean(report);
+  const engineName = isDirect ? directEngineName(report) : "Kimi";
+  if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Kimi report";
+  const labels = isDirect
+    ? [
+        ["Report overview", `Parsed from raw ${engineName} output`],
+        ["Findings by severity", "Critical to low"],
+        ["Evidence and remediation", "Plan, logs, validation"],
+        ["Raw LLM output", "Unmodified source"],
+      ]
+    : [
+        ["Facts", "Passive evidence"],
+        ["Security findings", "Classified issues"],
+        ["Recommended architecture", "Hosting and edge hardening"],
+        ["Structured synthesis", "LLM output"],
+      ];
+  labels.forEach(([title, subtitle], index) => {
+    const section = sections[index];
+    if (!section) return;
+    const heading = section.querySelector(".section-heading h3");
+    const label = section.querySelector(".section-heading span");
+    if (heading) heading.textContent = title;
+    if (label) label.textContent = subtitle;
+  });
+}
+
+function isDirectReport(report) {
+  return ["aegis_direct", "kimi_direct", "direct"].includes(
+    report?.surface?.analysis_mode,
+  );
+}
+
+function directEngineName(report) {
+  return report?.surface?.analysis_mode === "kimi_direct" ? "Kimi" : "Aegis";
+}
+
+function parseDirectReport(raw) {
+  const sections = splitReportSections(raw);
+  const findings = [];
+  for (const severity of ["critical", "high", "medium", "low"]) {
+    findings.push(...parseFindingSection(sections.get(`${severity} findings`) || "", severity));
+  }
+
+  if (!findings.length) findings.push(...parseInlineSeverityFindings(raw));
+
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+  findings.forEach((finding) => {
+    if (counts[finding.severity] !== undefined) counts[finding.severity] += 1;
+  });
+
+  return {
+    sections,
+    findings,
+    counts,
+    summary: sections.get("executive risk summary") || firstParagraph(raw),
+    evidenceLog: sections.get("tested paths / evidence log") || "",
+    validation: sections.get("false positives / needs validation") || "",
+    remediation: sections.get("prioritized remediation plan") || "",
+  };
+}
+
+function splitReportSections(raw) {
+  const known = new Set([
+    "executive risk summary",
+    "critical findings",
+    "high findings",
+    "medium findings",
+    "low findings",
+    "tested paths / evidence log",
+    "false positives / needs validation",
+    "prioritized remediation plan",
+  ]);
+  const sections = new Map();
+  let current = "preamble";
+  let buffer = [];
+
+  String(raw || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .forEach((line) => {
+      const heading = normalizeReportHeading(line);
+      if (known.has(heading)) {
+        if (buffer.join("\n").trim()) sections.set(current, buffer.join("\n").trim());
+        current = heading;
+        buffer = [];
+        return;
+      }
+      buffer.push(line);
+    });
+
+  if (buffer.join("\n").trim()) sections.set(current, buffer.join("\n").trim());
+  return sections;
+}
+
+function normalizeReportHeading(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^#{1,4}\s*/, "")
+    .replace(/^\*\*/, "")
+    .replace(/\*\*$/, "")
+    .replace(/:$/, "")
+    .trim()
+    .toLowerCase();
+}
+
+function parseFindingSection(text, fallbackSeverity) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return [];
+
+  const numberedBlocks = normalized
+    .split(/\n(?=\d+\.\s+\*\*Vulnerability:\*\*)/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const blocks =
+    numberedBlocks.length > 1 || /^\d+\.\s+\*\*Vulnerability:\*\*/.test(numberedBlocks[0] || "")
+      ? numberedBlocks
+      : normalized
+          .split(/\n(?=-\s+\*\*)/g)
+          .map((block) => block.trim())
+          .filter(Boolean);
+
+  return blocks.map((block, index) => findingFromBlock(block, fallbackSeverity, index + 1));
+}
+
+function findingFromBlock(block, fallbackSeverity, index) {
+  const fields = extractFindingFields(block);
+  const bulletTitle = block.match(/^-\s+\*\*([^*]+)\*\*:?\s*(.*)$/m);
+  const title =
+    fields.vulnerability ||
+    (bulletTitle ? `${bulletTitle[1]}${bulletTitle[2] ? `: ${bulletTitle[2]}` : ""}` : "") ||
+    `${capitalize(fallbackSeverity)} finding ${index}`;
+  const severity = normalizeSeverity(fields.severity || fallbackSeverity);
+  return {
+    title: stripMarkdown(title),
+    severity,
+    evidence: fields.evidence || "",
+    usage:
+      fields["how someone could use it"] ||
+      fields["how it could be used"] ||
+      fields["abuse path"] ||
+      "",
+    impact: fields.impact || "",
+    fix: fields.fix || fields.recommendation || "",
+    confidence: fields.confidence || "",
+    raw: block,
+  };
+}
+
+function extractFindingFields(block) {
+  const fields = {};
+  const pattern =
+    /\*\*([^:*]{2,70}):\*\*\s*([\s\S]*?)(?=\n\s*(?:\d+\.\s+)?\*\*[^:*]{2,70}:\*\*|\n\s*-\s+\*\*|$)/g;
+  let match;
+  while ((match = pattern.exec(block))) {
+    const key = match[1].trim().toLowerCase();
+    fields[key] = match[2].trim();
+  }
+  return fields;
+}
+
+function parseInlineSeverityFindings(raw) {
+  const fields = extractFindingFields(raw);
+  if (!fields.vulnerability && !fields.evidence) return [];
+  return [findingFromBlock(raw, normalizeSeverity(fields.severity || "medium"), 1)];
+}
+
+function renderDirectFindings(parsed, engineName = "Aegis") {
+  if (!parsed.findings.length) {
+    return `<p class="panel-placeholder">No classified findings were parsed. The raw ${escapeHtml(engineName)} report is preserved below.</p>`;
+  }
+  return ["critical", "high", "medium", "low"]
+    .map((severity) => {
+      const group = parsed.findings.filter((finding) => finding.severity === severity);
+      if (!group.length) return "";
+      return `
+        <section class="direct-severity-group report-searchable">
+          <div class="direct-group-heading">
+            <h4>${capitalize(severity)} findings</h4>
+            <span class="severity-tag ${severity}">${group.length}</span>
+          </div>
+          ${group.map(renderDirectFindingCard).join("")}
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function renderDirectFindingCard(finding) {
+  return `
+    <article class="direct-finding-card ${escapeHtml(finding.severity)} report-searchable">
+      <div class="finding-topline">
+        <h3>${escapeHtml(finding.title)}</h3>
+        <span class="severity-tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+      </div>
+      ${renderFindingField("Evidence", finding.evidence)}
+      ${renderFindingField("How it could be used", finding.usage)}
+      ${renderFindingField("Impact", finding.impact)}
+      ${renderFindingField("Fix", finding.fix)}
+      ${renderFindingField("Confidence", finding.confidence)}
+    </article>
+  `;
+}
+
+function renderDirectSupportSections(parsed) {
+  const cards = [
+    ["Priority remediation plan", parsed.remediation],
+    ["Tested paths / evidence log", parsed.evidenceLog],
+    ["False positives / needs validation", parsed.validation],
+  ].filter(([, content]) => content.trim());
+
+  if (!cards.length) {
+    return '<p class="panel-placeholder">Evidence and remediation details are available in the raw report below.</p>';
+  }
+
+  return cards
+    .map(([title, content]) => {
+      return `
+        <article class="direct-support-card report-searchable">
+          <h3>${escapeHtml(title)}</h3>
+          ${renderTextBlock(content)}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderSeverityBars(counts) {
+  const max = Math.max(1, counts.critical, counts.high, counts.medium, counts.low);
+  return ["critical", "high", "medium", "low"]
+    .map((severity) => {
+      const count = counts[severity] || 0;
+      const width = Math.max(4, Math.round((count / max) * 100));
+      return `
+        <div class="severity-bar-row ${severity}">
+          <span>${capitalize(severity)}</span>
+          <div class="severity-bar-track"><i style="width: ${width}%"></i></div>
+          <strong>${count}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderFindingField(label, value) {
+  if (!value) return "";
+  return `<p><strong>${escapeHtml(label)}:</strong> ${renderInlineMarkdown(value)}</p>`;
+}
+
+function renderTextBlock(text) {
+  const lines = String(text || "")
+    .trim()
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  return lines.map((line) => `<p>${renderInlineMarkdown(line)}</p>`).join("");
+}
+
+function renderInlineMarkdown(value) {
+  return escapeHtml(value)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    );
+}
+
+function firstParagraph(raw) {
+  return (
+    String(raw || "")
+      .replace(/\r\n/g, "\n")
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .find((part) => part && !normalizeReportHeading(part).endsWith("findings")) || ""
+  );
+}
+
+function directPostureLabel(counts, engineName = "Aegis") {
+  if (counts.critical) return "Critical exposure";
+  if (counts.high) return "High risk";
+  if (counts.medium) return "Needs hardening";
+  if (counts.low) return "Low risk findings";
+  return `${engineName} direct assessment`;
+}
+
+function normalizeSeverity(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["critical", "high", "medium", "low"].includes(normalized)) return normalized;
+  return "medium";
+}
+
+function stripMarkdown(value) {
+  return String(value || "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
+}
+
+function capitalize(value) {
+  const text = String(value || "");
+  return text ? text[0].toUpperCase() + text.slice(1) : "";
+}
+
+function formatDuration(ms) {
+  const value = Number(ms || 0);
+  if (!value) return "n/a";
+  if (value < 1000) return `${value} ms`;
+  return `${Math.round(value / 1000)} s`;
 }
 
 function renderEmptyReport() {
+  setReportModeLabels(null);
+  factsPanel.classList.remove("direct-dashboard");
+  findingsList.classList.remove("direct-findings-list");
+  hostingList.classList.remove("direct-support-list");
   renderMetrics({
     score: 0,
     posture: "Awaiting scan",
@@ -333,7 +699,7 @@ function renderEmptyReport() {
   `;
   findingsList.innerHTML = '<p class="panel-placeholder">Findings will appear after the first scan.</p>';
   hostingList.innerHTML = '<p class="panel-placeholder">Architecture recommendations will appear after analysis.</p>';
-  llmOutput.textContent = "The structured synthesis will appear after the first completed scan.";
+  llmOutput.textContent = "The model output will appear after the first completed scan.";
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
 }
@@ -357,6 +723,9 @@ function appendReportReadyMessage(report) {
 }
 
 function renderFacts(report) {
+  factsPanel.classList.remove("direct-dashboard");
+  findingsList.classList.remove("direct-findings-list");
+  hostingList.classList.remove("direct-support-list");
   const tls = report.tls || {};
   const page = report.page || {};
   const http = report.http || {};
@@ -549,4 +918,49 @@ function updateProgress() {
   const progress = Math.min(100, Math.round(((completed + runningBonus) / totalSteps) * 100));
   progressBar.style.setProperty("--progress", `${progress}%`);
   workProgressLabel.textContent = `${progress}%`;
+}
+
+function installLocalPreviewHook() {
+  if (!["127.0.0.1", "localhost"].includes(window.location.hostname)) return;
+  const previewHash = "#aegisPreviewReport=";
+  if (window.location.hash.startsWith(previewHash)) {
+    try {
+      const encodedReport = window.location.hash.slice(previewHash.length);
+      renderReport(JSON.parse(decodeBase64Utf8(encodedReport)));
+      openReportModal();
+      window.history.replaceState(null, "", window.location.pathname);
+    } catch (error) {
+      console.warn("Invalid Aegis hash preview report.", error);
+    }
+  }
+  try {
+    const previewPayload = window.localStorage.getItem("aegisPreviewReport");
+    if (previewPayload) {
+      window.localStorage.removeItem("aegisPreviewReport");
+      renderReport(JSON.parse(previewPayload));
+      openReportModal();
+    }
+  } catch (error) {
+    console.warn("Invalid Aegis preview report.", error);
+  }
+  document.addEventListener("aegis:preview-report", (event) => {
+    if (!event.detail) return;
+    renderReport(event.detail);
+    openReportModal();
+  });
+  window.__aegisPreviewReport = (report) => {
+    renderReport(report);
+    openReportModal();
+    return {
+      findingCards: document.querySelectorAll(".direct-finding-card").length,
+      supportCards: document.querySelectorAll(".direct-support-card").length,
+      rawLength: llmOutput.textContent.length,
+    };
+  };
+}
+
+function decodeBase64Utf8(value) {
+  const binary = window.atob(value);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }

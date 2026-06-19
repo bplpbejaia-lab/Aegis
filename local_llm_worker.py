@@ -100,19 +100,19 @@ def run_provider(job: dict[str, Any], job_path: Path) -> tuple[str, str]:
     if not prompt.strip():
         raise ValueError("Job does not contain a prompt.")
 
-    if WORKER_PROVIDER == "codex":
+    if WORKER_PROVIDER in {"codex", "aegis"}:
         return run_codex(prompt, job_path), provider_model_label()
     if WORKER_PROVIDER == "openai":
         return run_openai(prompt), provider_model_label()
     if WORKER_PROVIDER == "echo":
         return (
             "Local bridge echo mode is running. Switch AEGIS_LOCAL_WORKER_PROVIDER "
-            "to codex or openai for real synthesis.",
+            "to aegis or openai for real synthesis.",
             "echo",
         )
 
     raise ValueError(
-        "Unsupported AEGIS_LOCAL_WORKER_PROVIDER. Use codex, openai, or echo."
+        "Unsupported AEGIS_LOCAL_WORKER_PROVIDER. Use aegis, openai, or echo."
     )
 
 
@@ -157,7 +157,7 @@ def run_codex(prompt: str, job_path: Path) -> str:
     stderr = completed.stderr.strip()
     if completed.returncode != 0:
         detail = stderr or stdout or f"exit code {completed.returncode}"
-        raise RuntimeError(f"Codex command failed: {detail}")
+        raise RuntimeError(f"Aegis local engine command failed: {detail}")
     if output_path.exists():
         content = output_path.read_text(encoding="utf-8").strip()
         if content:
@@ -203,8 +203,8 @@ def run_openai(prompt: str) -> str:
 
 
 def provider_model_label() -> str:
-    if WORKER_PROVIDER == "codex":
-        return os.getenv("AEGIS_CODEX_MODEL_LABEL", "Local Codex CLI")
+    if WORKER_PROVIDER in {"codex", "aegis"}:
+        return os.getenv("AEGIS_CODEX_MODEL_LABEL", "Aegis local engine")
     if WORKER_PROVIDER == "openai":
         return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     return WORKER_PROVIDER
