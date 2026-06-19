@@ -2,6 +2,9 @@ const form = document.querySelector("#audit-form");
 const targetInput = document.querySelector("#target");
 const authorizedInput = document.querySelector("#authorized");
 const analysisEngineInput = document.querySelector("#analysis-engine");
+const validationModeInput = document.querySelector("#validation-mode");
+const proofAuthorizedInput = document.querySelector("#proof-authorized");
+const proofConsentRow = document.querySelector("#proof-consent-row");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
 const traceList = document.querySelector("#trace-list");
@@ -46,6 +49,7 @@ if (document.readyState === "loading") {
 function initializeApp() {
   targetInput?.focus();
   setReportNavReady(false);
+  updateProofConsentVisibility();
   installLocalPreviewHook();
 }
 
@@ -53,6 +57,8 @@ form?.addEventListener("submit", async (event) => {
   event.preventDefault();
   await runAnalysis();
 });
+
+validationModeInput?.addEventListener("change", updateProofConsentVisibility);
 
 openReportButton?.addEventListener("click", () => {
   if (currentReport) {
@@ -97,6 +103,13 @@ reportSearchInput?.addEventListener("input", () => {
 
 async function runAnalysis() {
   const target = normalizeTargetInput(targetInput.value);
+  const validationMode = validationModeInput?.value || "safe";
+  const proofAuthorized = Boolean(proofAuthorizedInput?.checked);
+  if (validationMode === "proof" && !proofAuthorized) {
+    showError("Proof mode requires separate reversible-proof authorization.");
+    proofAuthorizedInput?.focus();
+    return;
+  }
   targetInput.value = target;
   document.body.classList.remove("is-pristine");
   resetRun(target);
@@ -118,6 +131,8 @@ async function runAnalysis() {
         target,
         authorized: authorizedInput.checked,
         engine: analysisEngineInput?.value || "aegis",
+        validation_mode: validationMode,
+        proof_authorized: proofAuthorized,
       }),
     });
 
@@ -150,6 +165,12 @@ async function runAnalysis() {
     window.clearInterval(timer);
     updateElapsed();
   }
+}
+
+function updateProofConsentVisibility() {
+  const isProofMode = validationModeInput?.value === "proof";
+  if (proofConsentRow) proofConsentRow.hidden = !isProofMode;
+  if (!isProofMode && proofAuthorizedInput) proofAuthorizedInput.checked = false;
 }
 
 function handleEvent(message) {
@@ -314,6 +335,7 @@ function renderDirectPanels(report) {
   const rawOutput = report.llm?.content || "";
   const parsed = parseDirectReport(rawOutput);
   const engineName = directEngineName(report);
+  const validationLabel = validationModeLabel(report.surface?.validation_mode);
   const totalFindings = parsed.findings.length;
   const weightedScore = Math.min(
     100,
@@ -351,6 +373,7 @@ function renderDirectPanels(report) {
       <dl>
         <div><dt>Target</dt><dd>${escapeHtml(report.final_url || report.target || "")}</dd></div>
         <div><dt>Mode</dt><dd>${escapeHtml(engineName)} direct assessment</dd></div>
+        <div><dt>Validation</dt><dd>${escapeHtml(validationLabel)}</dd></div>
         <div><dt>Engine</dt><dd>${escapeHtml(report.llm?.model || engineName)}</dd></div>
         <div><dt>Duration</dt><dd>${escapeHtml(formatDuration(report.duration_ms))}</dd></div>
       </dl>
@@ -397,6 +420,12 @@ function isDirectReport(report) {
 
 function directEngineName(report) {
   return report?.surface?.analysis_mode === "kimi_direct" ? "Kimi" : "Aegis";
+}
+
+function validationModeLabel(mode) {
+  if (mode === "proof") return "Proof mode";
+  if (mode === "active") return "Active validation";
+  return "Safe analysis";
 }
 
 function parseDirectReport(raw) {

@@ -65,6 +65,8 @@ class AnalysisRequest(BaseModel):
     target: str = Field(..., min_length=3, max_length=2048)
     authorized: bool = False
     engine: str = "aegis"
+    validation_mode: str = "safe"
+    proof_authorized: bool = False
 
 
 class PageParser(HTMLParser):
@@ -229,11 +231,23 @@ async def run_analysis(payload: AnalysisRequest):
         yield event("step", step)
         target_url = await asyncio.to_thread(normalize_target, payload.target)
         selected_engine = normalize_analysis_engine(payload.engine)
+        validation_mode = normalize_validation_mode(payload.validation_mode)
+        if validation_mode == "proof" and not payload.proof_authorized:
+            yield event(
+                "error",
+                {"message": "Proof mode requires separate reversible-proof authorization."},
+            )
+            return
         step.update(
             {
                 "status": "complete",
                 "detail": f"Target accepted as {target_url}.",
-                "result": {"target_url": target_url, "engine": selected_engine},
+                "result": {
+                    "target_url": target_url,
+                    "engine": selected_engine,
+                    "validation_mode": validation_mode,
+                    "proof_authorized": payload.proof_authorized,
+                },
             }
         )
         yield event("step", step)
@@ -261,6 +275,8 @@ async def run_analysis(payload: AnalysisRequest):
                 asyncio.to_thread(
                     call_kimi_direct_pentest if is_kimi else call_aegis_direct_pentest,
                     target_url,
+                    validation_mode,
+                    payload.proof_authorized,
                 )
             )
             while not llm_task.done():
@@ -305,6 +321,8 @@ async def run_analysis(payload: AnalysisRequest):
                 elapsed_ms,
                 posture=engine_title,
                 analysis_mode=step_id,
+                validation_mode=validation_mode,
+                proof_authorized=payload.proof_authorized,
                 technology=f"{'Kimi' if is_kimi else 'Aegis'} direct analysis",
                 reason_phrase="Kimi K2" if is_kimi else "Aegis Engine",
             )
@@ -498,6 +516,15 @@ def normalize_analysis_engine(raw_engine: str) -> str:
     if engine in {"kimi", "hf", "huggingface", "hugging_face"}:
         return "kimi"
     return "aegis"
+
+
+def normalize_validation_mode(raw_mode: str) -> str:
+    mode = str(raw_mode or "safe").strip().lower()
+    if mode in {"active", "active_validation", "validate"}:
+        return "active"
+    if mode in {"proof", "proof_mode", "poc"}:
+        return "proof"
+    return "safe"
 
 
 def normalize_target(raw_target: str) -> str:
@@ -2020,14 +2047,28 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
     }
 
 
-def call_aegis_direct_pentest(target_url: str) -> dict[str, Any]:
-    prompt = build_aegis_direct_pentest_prompt(target_url)
+def call_aegis_direct_pentest(
+    target_url: str,
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
+) -> dict[str, Any]:
+    prompt = build_aegis_direct_pentest_prompt(
+        target_url,
+        validation_mode,
+        proof_authorized,
+    )
     result = call_local_bridge_prompt(target_url, prompt)
     result["analysis_mode"] = "aegis_direct"
+    result["validation_mode"] = validation_mode
+    result["proof_authorized"] = proof_authorized
     return result
 
 
-def call_kimi_direct_pentest(target_url: str) -> dict[str, Any]:
+def call_kimi_direct_pentest(
+    target_url: str,
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
+) -> dict[str, Any]:
     token_choices = rotated_hf_tokens()
     if not token_choices:
         return {
@@ -2035,13 +2076,19 @@ def call_kimi_direct_pentest(target_url: str) -> dict[str, Any]:
             "model": PUBLIC_MODEL_LABEL,
             "credential_count": 0,
             "analysis_mode": "kimi_direct",
+            "validation_mode": validation_mode,
+            "proof_authorized": proof_authorized,
             "content": (
                 "HF_TOKENS or HF_TOKEN is not configured. Kimi direct analysis cannot run "
                 "until a Hugging Face token is configured and the server is restarted."
             ),
         }
 
-    prompt = build_kimi_direct_pentest_prompt(target_url)
+    prompt = build_kimi_direct_pentest_prompt(
+        target_url,
+        validation_mode,
+        proof_authorized,
+    )
     all_tokens = [token for _, token in token_choices]
     errors: list[str] = []
     for token_index, token in token_choices[:HF_MAX_ATTEMPTS]:
@@ -2056,6 +2103,8 @@ def call_kimi_direct_pentest(target_url: str) -> dict[str, Any]:
                 "credential_index": token_index + 1,
                 "attempts": len(errors) + 1,
                 "analysis_mode": "kimi_direct",
+                "validation_mode": validation_mode,
+                "proof_authorized": proof_authorized,
             }
         except Exception as exc:
             errors.append(redact_llm_error(exc, all_tokens))
@@ -2068,6 +2117,8 @@ def call_kimi_direct_pentest(target_url: str) -> dict[str, Any]:
         "attempts": len(errors),
         "error": "all_hf_credentials_failed",
         "analysis_mode": "kimi_direct",
+        "validation_mode": validation_mode,
+        "proof_authorized": proof_authorized,
         "content": f"Kimi direct analysis failed after all configured credential(s). Last error: {last_error}",
     }
 
@@ -2079,6 +2130,8 @@ def build_direct_report(
     elapsed_ms: int,
     posture: str = "Aegis direct assessment",
     analysis_mode: str = "aegis_direct",
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
     technology: str = "Aegis direct analysis",
     reason_phrase: str = "Aegis Engine",
 ) -> dict[str, Any]:
@@ -2103,7 +2156,11 @@ def build_direct_report(
         "network": {"hostname": urlparse(target_url).hostname or "", "ips": []},
         "dns_records": {},
         "wordpress": {"detected": False, "components": {}},
-        "surface": {"analysis_mode": analysis_mode},
+        "surface": {
+            "analysis_mode": analysis_mode,
+            "validation_mode": validation_mode,
+            "proof_authorized": proof_authorized,
+        },
         "page": {
             "title": posture,
             "forms_count": 0,
@@ -2123,19 +2180,67 @@ def build_direct_report(
     }
 
 
-def build_aegis_direct_pentest_prompt(target_url: str) -> str:
+def build_aegis_direct_pentest_prompt(
+    target_url: str,
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
+) -> str:
     return build_direct_pentest_prompt(
         target_url,
         "You are running as the Aegis local analysis engine.",
         "Use local command-line tools and safe scripts available in this environment to gather evidence.",
+        validation_mode,
+        proof_authorized,
     )
 
 
-def build_kimi_direct_pentest_prompt(target_url: str) -> str:
+def build_kimi_direct_pentest_prompt(
+    target_url: str,
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
+) -> str:
     return build_direct_pentest_prompt(
         target_url,
         "You are Kimi K2 running as the selected Aegis analysis engine.",
         "Do not use or assume any precomputed passive collector output; the backend only passed you the target.",
+        validation_mode,
+        proof_authorized,
+    )
+
+
+def build_validation_mode_rules(validation_mode: str, proof_authorized: bool) -> str:
+    if validation_mode == "proof" and proof_authorized:
+        return (
+            "Proof mode rules:\n"
+            "- You may perform only tiny, reversible proof-of-impact validation on the authorized target.\n"
+            "- Before any state change, capture the original value and choose a harmless test value such as "
+            "`aegis-proof-test`.\n"
+            "- Immediately revert the value to the original state and verify the revert.\n"
+            "- Never change payments, approvals, enrollments, user roles, passwords, security settings, "
+            "database exports, messages, personal data, files, or anything that affects real users or business flow.\n"
+            "- Never delete data, upload files, send email/SMS, approve/reject records, create accounts, or persist access.\n"
+            "- If the change cannot be proven harmless and reversible, do not mutate; instead include a "
+            "`Proof-of-impact request` with the exact proposed field, original value needed, test value, and revert plan.\n"
+            "- The report must include Proof actions attempted, before/after/revert evidence, and anything skipped."
+        )
+    if validation_mode == "proof":
+        return (
+            "Proof mode was selected but separate proof authorization is missing. Do not mutate state. "
+            "Provide proof-of-impact requests only."
+        )
+    if validation_mode == "active":
+        return (
+            "Active validation rules:\n"
+            "- Perform safe non-mutating validation beyond passive observation where useful.\n"
+            "- Allowed: GET, HEAD, OPTIONS, harmless route checks, response comparison, public API reads, "
+            "header/CORS/TLS/DNS checks, and version/CVE correlation from observed evidence.\n"
+            "- Not allowed: any state-changing request, file upload, account creation, form submission, "
+            "approval/rejection action, brute force, fuzzing that could degrade service, or data exfiltration."
+        )
+    return (
+        "Safe analysis rules:\n"
+        "- Do not mutate state. Use passive and low-impact public observation only.\n"
+        "- If proof is needed, describe the exact safe validation plan without executing a change."
     )
 
 
@@ -2143,7 +2248,10 @@ def build_direct_pentest_prompt(
     target_url: str,
     engine_intro: str,
     evidence_instruction: str,
+    validation_mode: str = "safe",
+    proof_authorized: bool = False,
 ) -> str:
+    validation_rules = build_validation_mode_rules(validation_mode, proof_authorized)
     return (
         f"{engine_intro} The user explicitly requested an "
         "authorized security assessment of this target, and the Aegis UI authorization "
@@ -2151,6 +2259,8 @@ def build_direct_pentest_prompt(
         f"Target scope: {target_url}\n\n"
         "Do the assessment end-to-end yourself. Do not rely on any precomputed backend "
         f"collector output; the backend only passed you the target. {evidence_instruction}\n\n"
+        f"Validation mode: {validation_mode}. Proof authorization: {proof_authorized}.\n"
+        f"{validation_rules}\n\n"
         "Rules of engagement:\n"
         "- Stay in the exact target origin and directly related same-site public resources.\n"
         "- Use non-destructive authorized testing only: DNS, TLS, HTTP(S), headers, robots, "
@@ -2158,8 +2268,8 @@ def build_direct_pentest_prompt(
         "CMS fingerprinting, safe GET/HEAD/OPTIONS requests, public metadata, public files, "
         "and version/CVE correlation when versions are actually observed.\n"
         "- Do not brute force credentials, bypass authentication, exploit RCE/SQLi/XSS, upload "
-        "files, mutate state, run destructive checks, cause denial of service, spam requests, "
-        "or exfiltrate private data.\n"
+        "files, run destructive checks, cause denial of service, spam requests, or exfiltrate "
+        "private data.\n"
         "- If a possible issue needs authenticated, server-side, or intrusive validation, mark "
         "it clearly as requiring validation instead of claiming exploitation.\n\n"
         "Testing depth expected:\n"
