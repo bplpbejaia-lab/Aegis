@@ -149,19 +149,21 @@ def run_codex(prompt: str, job_path: Path) -> str:
         input=prompt if prompt_mode == "stdin" else None,
         cwd=APP_DIR,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=timeout,
         check=False,
     )
-    stdout = completed.stdout.strip()
-    stderr = completed.stderr.strip()
+    if output_path.exists():
+        content = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        if content:
+            return content
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
     if completed.returncode != 0:
         detail = stderr or stdout or f"exit code {completed.returncode}"
         raise RuntimeError(f"Aegis local engine command failed: {detail}")
-    if output_path.exists():
-        content = output_path.read_text(encoding="utf-8").strip()
-        if content:
-            return content
     return stdout or stderr
 
 

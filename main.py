@@ -256,10 +256,31 @@ async def run_analysis(payload: AnalysisRequest):
                 engine_detail,
             )
             yield event("step", step)
-            llm_context = await asyncio.to_thread(
-                call_kimi_direct_pentest if is_kimi else call_aegis_direct_pentest,
-                target_url,
+            direct_started_at = time.perf_counter()
+            llm_task = asyncio.create_task(
+                asyncio.to_thread(
+                    call_kimi_direct_pentest if is_kimi else call_aegis_direct_pentest,
+                    target_url,
+                )
             )
+            while not llm_task.done():
+                await asyncio.sleep(15)
+                if llm_task.done():
+                    break
+                elapsed_label = human_duration(
+                    int((time.perf_counter() - direct_started_at) * 1000)
+                )
+                step.update(
+                    {
+                        "detail": (
+                            f"{engine_title} is still running. "
+                            f"Elapsed: {elapsed_label}. Waiting for model output."
+                        ),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                yield event("step", step)
+            llm_context = await llm_task
             step.update(
                 {
                     "status": "complete",
@@ -462,6 +483,14 @@ async def run_analysis(payload: AnalysisRequest):
 
 def event(kind: str, data: dict[str, Any]) -> str:
     return json.dumps({"type": kind, "data": data}, default=str) + "\n"
+
+
+def human_duration(duration_ms: int) -> str:
+    seconds = max(0, int(round(duration_ms / 1000)))
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes} min {remaining_seconds:02d} sec"
+    return f"{remaining_seconds} sec"
 
 
 def normalize_analysis_engine(raw_engine: str) -> str:

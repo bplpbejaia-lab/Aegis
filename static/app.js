@@ -169,16 +169,16 @@ function handleEvent(message) {
     appendReportReadyMessage(data);
     openReportModal();
     agentState.textContent = "Complete";
-    agentDetail.textContent = `Report completed in ${data.duration_ms} ms.`;
+    agentDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workStatus.textContent = "Complete";
-    workDetail.textContent = `Report completed in ${data.duration_ms} ms.`;
+    workDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workProgressLabel.textContent = "100%";
   }
   if (type === "error") {
     showError(data.message);
   }
   if (type === "done") {
-    elapsed.textContent = `${data.duration_ms} ms`;
+    elapsed.textContent = formatDuration(data.duration_ms);
   }
 }
 
@@ -254,7 +254,7 @@ function renderStep(step) {
 
 function resetWorkBoard() {
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing passive tools.";
+  workDetail.textContent = "Preparing Aegis tools.";
   workProgressLabel.textContent = "0%";
   workSteps.innerHTML = "";
 }
@@ -671,7 +671,11 @@ function formatDuration(ms) {
   const value = Number(ms || 0);
   if (!value) return "n/a";
   if (value < 1000) return `${value} ms`;
-  return `${Math.round(value / 1000)} s`;
+  const seconds = Math.round(value / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (!minutes) return `${seconds} sec`;
+  return `${minutes} min ${String(remainingSeconds).padStart(2, "0")} sec`;
 }
 
 function renderEmptyReport() {
@@ -714,7 +718,7 @@ function appendReportReadyMessage(report) {
   item.innerHTML = `
     <span class="message-avatar" aria-hidden="true">A</span>
     <div class="message-body report-ready">
-      <p><strong>Report ready.</strong> Score ${escapeHtml(report.score)} / ${escapeHtml(report.posture)} / ${escapeHtml(report.duration_ms)} ms.</p>
+      <p><strong>Report ready.</strong> Score ${escapeHtml(report.score)} / ${escapeHtml(report.posture)} / ${escapeHtml(formatDuration(report.duration_ms))}.</p>
       <button type="button" data-open-report>Open report</button>
     </div>
   `;
@@ -891,7 +895,7 @@ function filterReport(query) {
 
 function updateElapsed() {
   if (!runStartedAt) return;
-  elapsed.textContent = `${Math.max(0, Math.round(performance.now() - runStartedAt))} ms`;
+  elapsed.textContent = formatDuration(Math.max(0, Math.round(performance.now() - runStartedAt)));
 }
 
 function scrollChatToBottom() {
