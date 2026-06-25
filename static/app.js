@@ -7,6 +7,7 @@ const proofAuthorizedInput = document.querySelector("#proof-authorized");
 const proofConsentRow = document.querySelector("#proof-consent-row");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
+const stopButton = document.querySelector("#stop-button");
 const authPanel = document.querySelector("#auth-panel");
 const authModal = document.querySelector("#auth-modal");
 const accountModal = document.querySelector("#account-modal");
@@ -18,6 +19,12 @@ const signupPlanInput = document.querySelector("#signup-plan");
 const accountPlanInput = document.querySelector("#account-plan");
 const accountName = document.querySelector("#account-name");
 const accountPlanLabel = document.querySelector("#account-plan-label");
+const adminDashboard = document.querySelector("#admin-dashboard");
+const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashboard");
+const adminSummary = document.querySelector("#admin-summary");
+const adminLiveRuns = document.querySelector("#admin-live-runs");
+const adminUsers = document.querySelector("#admin-users");
+const adminRuns = document.querySelector("#admin-runs");
 const authMessage = document.querySelector("#auth-message");
 const logoutButton = document.querySelector("#logout-button");
 const sessionButton = document.querySelector("#session-button");
@@ -70,6 +77,9 @@ let timer = null;
 let currentReport = null;
 let currentUser = null;
 let appConfig = { plans: [], google_client_id: "" };
+let currentRunId = "";
+let currentRunController = null;
+let isStoppingRun = false;
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -91,6 +101,10 @@ async function initializeApp() {
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
   await runAnalysis();
+});
+
+stopButton?.addEventListener("click", () => {
+  stopCurrentRun();
 });
 
 validationModeInput?.addEventListener("change", updateProofConsentVisibility);
@@ -138,6 +152,10 @@ accountPlanInput?.addEventListener("change", async () => {
   } catch (error) {
     showAuthMessage(error.message, true);
   }
+});
+
+refreshAdminDashboardButton?.addEventListener("click", () => {
+  loadAdminDashboard();
 });
 
 logoutButton?.addEventListener("click", async () => {
@@ -319,6 +337,7 @@ function renderSession() {
   }
   if (!signedIn) {
     closeAccountModal();
+    if (adminDashboard) adminDashboard.hidden = true;
     showAuthMessage("Use your workspace account to continue.", false);
     return;
   }
@@ -329,6 +348,8 @@ function renderSession() {
     accountPlanInput.value = plan.id === "admin" ? "pro_3" : plan.id;
     accountPlanInput.disabled = Boolean(currentUser.is_admin);
   }
+  if (adminDashboard) adminDashboard.hidden = !currentUser.is_admin;
+  if (currentUser.is_admin) loadAdminDashboard();
 }
 
 function openAuthModal(tab = "login") {
@@ -360,6 +381,7 @@ function openAccountModal() {
   accountModal.hidden = false;
   document.body.classList.add("modal-open");
   accountPlanInput?.focus();
+  if (currentUser?.is_admin) loadAdminDashboard();
 }
 
 function closeAccountModal() {
@@ -368,6 +390,138 @@ function closeAccountModal() {
   if (reportModal?.hidden !== false && authModal?.hidden !== false) {
     document.body.classList.remove("modal-open");
   }
+}
+
+async function loadAdminDashboard() {
+  if (!currentUser?.is_admin || !adminDashboard) return;
+  setAdminLoading();
+  try {
+    const data = await apiJson("/api/admin/dashboard");
+    renderAdminDashboard(data);
+  } catch (error) {
+    if (adminSummary) {
+      adminSummary.innerHTML = `<p class="admin-empty">${escapeHtml(error.message)}</p>`;
+    }
+  }
+}
+
+function setAdminLoading() {
+  if (adminSummary) adminSummary.innerHTML = '<p class="admin-empty">Loading dashboard...</p>';
+  if (adminLiveRuns) adminLiveRuns.innerHTML = "";
+  if (adminUsers) adminUsers.innerHTML = "";
+  if (adminRuns) adminRuns.innerHTML = "";
+}
+
+function renderAdminDashboard(data) {
+  const summary = data.summary || {};
+  if (adminSummary) {
+    adminSummary.innerHTML = [
+      ["Users", summary.users || 0],
+      ["Active sessions", summary.active_sessions || 0],
+      ["Live runs", summary.live_runs || 0],
+      ["Completed", summary.completed_runs || 0],
+      ["Problems", summary.problem_runs || 0],
+    ]
+      .map(
+        ([label, value]) => `
+          <div class="admin-stat">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+          </div>
+        `,
+      )
+      .join("");
+  }
+  renderAdminTable(
+    adminLiveRuns,
+    data.live_runs || [],
+    ["User", "Target", "Engine", "Status", "Updated"],
+    (run) => [
+      run.username,
+      compactUrl(run.target),
+      run.engine,
+      run.status,
+      relativeTime(run.updated_at),
+    ],
+    "No live runs.",
+  );
+  renderAdminTable(
+    adminUsers,
+    data.users || [],
+    ["User", "Plan", "Provider", "Sessions", "Runs", "Seen"],
+    (user) => [
+      user.username,
+      user.is_admin ? "admin" : user.plan,
+      user.provider,
+      user.active_sessions || 0,
+      user.total_runs || 0,
+      relativeTime(user.last_seen_at || user.last_run_at || user.created_at),
+    ],
+    "No users yet.",
+  );
+  renderAdminTable(
+    adminRuns,
+    data.recent_runs || [],
+    ["When", "User", "Target", "Engine", "Mode", "Status", "Score", "Duration"],
+    (run) => [
+      relativeTime(run.started_at),
+      run.username,
+      compactUrl(run.target),
+      run.engine,
+      run.validation_mode,
+      run.status,
+      run.score || 0,
+      formatDuration(run.duration_ms),
+    ],
+    "No run history yet.",
+  );
+}
+
+function renderAdminTable(container, rows, headings, rowMapper, emptyText) {
+  if (!container) return;
+  if (!rows.length) {
+    container.innerHTML = `<p class="admin-empty">${escapeHtml(emptyText)}</p>`;
+    return;
+  }
+  container.innerHTML = `
+    <table>
+      <thead>
+        <tr>${headings.map((heading) => `<th>${escapeHtml(heading)}</th>`).join("")}</tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map((row) => {
+            return `<tr>${rowMapper(row)
+              .map((value) => `<td>${escapeHtml(value ?? "")}</td>`)
+              .join("")}</tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function compactUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`;
+  } catch {
+    return String(value || "");
+  }
+}
+
+function relativeTime(value) {
+  if (!value) return "n/a";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
 }
 
 function showAuthMessage(message, isError = false) {
@@ -426,10 +580,14 @@ async function runAnalysis() {
   targetInput.value = target;
   document.body.classList.remove("is-pristine");
   resetRun(target);
+  currentRunId = createClientRunId();
+  currentRunController = new AbortController();
+  isStoppingRun = false;
   runStartedAt = performance.now();
   timer = window.setInterval(updateElapsed, 120);
   runButton.disabled = true;
   runButton.classList.add("is-running");
+  if (stopButton) stopButton.hidden = false;
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
   agentDetail.textContent = "Preparing Aegis tools.";
@@ -441,6 +599,7 @@ async function runAnalysis() {
     const token = window.localStorage.getItem(SESSION_KEY);
     const response = await fetch("/api/analyze", {
       method: "POST",
+      signal: currentRunController.signal,
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -451,6 +610,7 @@ async function runAnalysis() {
         engine: analysisEngineInput?.value || "aegis",
         validation_mode: validationMode,
         proof_authorized: proofAuthorized,
+        client_run_id: currentRunId,
       }),
     });
 
@@ -475,14 +635,56 @@ async function runAnalysis() {
 
     if (buffer.trim()) handleEvent(JSON.parse(buffer));
   } catch (error) {
-    showError(error.message);
+    if (isStoppingRun || error.name === "AbortError") {
+      markRunStopped();
+    } else {
+      showError(error.message);
+    }
   } finally {
     runButton.disabled = false;
     runButton.classList.remove("is-running");
+    if (stopButton) stopButton.hidden = true;
+    currentRunController = null;
     runLabel.textContent = "Analyze";
     window.clearInterval(timer);
     updateElapsed();
   }
+}
+
+async function stopCurrentRun() {
+  if (!currentRunId || isStoppingRun) return;
+  isStoppingRun = true;
+  if (stopButton) {
+    stopButton.disabled = true;
+    stopButton.textContent = "Stopping";
+  }
+  agentState.textContent = "Stopping";
+  agentDetail.textContent = "Cancelling the active analysis.";
+  workStatus.textContent = "Stopping";
+  workDetail.textContent = "Cancelling the active analysis.";
+  try {
+    await apiJson(`/api/analyze/${encodeURIComponent(currentRunId)}/cancel`, {
+      method: "POST",
+    });
+  } catch (error) {
+    appendErrorMessage(error.message);
+  }
+  currentRunController?.abort();
+  markRunStopped();
+}
+
+function markRunStopped() {
+  hideThinkingModal();
+  agentState.textContent = "Stopped";
+  agentDetail.textContent = "Analysis cancelled by user.";
+  workStatus.textContent = "Stopped";
+  workDetail.textContent = "Analysis cancelled by user.";
+  if (stopButton) {
+    stopButton.hidden = true;
+    stopButton.disabled = false;
+    stopButton.textContent = "Stop";
+  }
+  window.clearInterval(timer);
 }
 
 function updateProofConsentVisibility() {
@@ -493,6 +695,9 @@ function updateProofConsentVisibility() {
 
 function handleEvent(message) {
   const { type, data } = message;
+  if (type === "run") {
+    currentRunId = data.run_id || currentRunId;
+  }
   if (type === "step") {
     renderStep(data);
     agentState.textContent = data.status === "complete" ? "Thinking" : "Running";
@@ -521,6 +726,9 @@ function handleEvent(message) {
   if (type === "error") {
     showError(data.message);
   }
+  if (type === "cancelled") {
+    markRunStopped();
+  }
   if (type === "done") {
     elapsed.textContent = formatDuration(data.duration_ms);
     if (thinkingElapsed) thinkingElapsed.textContent = formatDuration(data.duration_ms);
@@ -529,6 +737,7 @@ function handleEvent(message) {
 
 function resetRun(target) {
   currentReport = null;
+  isStoppingRun = false;
   traceItems.clear();
   closeReportModal();
   setReportNavReady(false);
@@ -1235,6 +1444,11 @@ function showError(message) {
 
   runButton.disabled = false;
   runButton.classList.remove("is-running");
+  if (stopButton) {
+    stopButton.hidden = true;
+    stopButton.disabled = false;
+    stopButton.textContent = "Stop";
+  }
   runLabel.textContent = "Analyze";
   window.clearInterval(timer);
   scrollChatToBottom();
@@ -1293,6 +1507,11 @@ function normalizeTargetInput(value) {
   const repairedScheme = trimmed.replace(/^(https?):\/{3,}/i, (_, scheme) => `${scheme}://`);
   if (/^https?:\/\//i.test(repairedScheme)) return repairedScheme;
   return repairedScheme.replace(/^\/+/, "");
+}
+
+function createClientRunId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replaceAll("-", "");
+  return `run_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 function filterReport(query) {

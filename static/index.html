@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Aegis Autonomous Hosting & Security Analyst</title>
-    <link rel="stylesheet" href="/static/styles.css?v=prod-polish-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=admin-dashboard-2" />
   </head>
   <body class="is-pristine">
     <div class="app-shell">
@@ -50,6 +50,7 @@
                 <span class="button-mark" aria-hidden="true"></span>
                 <span id="run-label">Analyze</span>
               </button>
+              <button type="button" id="stop-button" hidden>Stop</button>
             </div>
 
             <div class="console-meta">
@@ -204,6 +205,40 @@
           </label>
           <button type="button" id="logout-button">Logout</button>
         </section>
+
+        <section class="admin-dashboard" id="admin-dashboard" hidden aria-label="Admin dashboard">
+          <div class="admin-heading">
+            <div>
+              <p class="kicker">Admin console</p>
+              <h3>Usage intelligence</h3>
+            </div>
+            <button type="button" id="refresh-admin-dashboard">Refresh</button>
+          </div>
+          <div id="admin-summary" class="admin-summary"></div>
+          <div class="admin-grid">
+            <article>
+              <div class="admin-section-heading">
+                <h4>Live runs</h4>
+                <span>queued / running</span>
+              </div>
+              <div id="admin-live-runs" class="admin-table"></div>
+            </article>
+            <article>
+              <div class="admin-section-heading">
+                <h4>Users</h4>
+                <span>sessions / plans</span>
+              </div>
+              <div id="admin-users" class="admin-table"></div>
+            </article>
+            <article class="wide">
+              <div class="admin-section-heading">
+                <h4>Run history</h4>
+                <span>latest 100</span>
+              </div>
+              <div id="admin-runs" class="admin-table"></div>
+            </article>
+          </div>
+        </section>
       </section>
     </div>
 
@@ -317,6 +352,6 @@
     </div>
 
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script src="/static/app.js?v=prod-polish-1"></script>
+    <script src="/static/app.js?v=admin-dashboard-2"></script>
   </body>
 </html>

@@ -69,6 +69,7 @@ LLM_BASE_PROMPT = (
     'vulnerability classifying it in critical/high/medium/low".'
 )
 DB_LOCK = threading.Lock()
+CANCELLED_RUNS: set[str] = set()
 PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
     "free": {
         "label": "Free",
@@ -106,6 +107,7 @@ class AnalysisRequest(BaseModel):
     engine: str = "aegis"
     validation_mode: str = "safe"
     proof_authorized: bool = False
+    client_run_id: str = Field(default="", max_length=64)
 
 
 class LoginRequest(BaseModel):
@@ -294,6 +296,7 @@ def init_db() -> None:
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL DEFAULT '',
                 expires_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -307,10 +310,50 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(subject, engine, period_key)
             );
+
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                user_plan TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                target TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                validation_mode TEXT NOT NULL,
+                proof_authorized INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                quota_plan TEXT NOT NULL DEFAULT '',
+                quota_limit INTEGER,
+                quota_remaining INTEGER,
+                score INTEGER NOT NULL DEFAULT 0,
+                critical INTEGER NOT NULL DEFAULT 0,
+                high INTEGER NOT NULL DEFAULT 0,
+                medium INTEGER NOT NULL DEFAULT 0,
+                low INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             """
         )
+        ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
         ensure_admin_user(connection)
         connection.commit()
+
+
+def ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    if any(row["name"] == column for row in columns):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def ensure_admin_user(connection: sqlite3.Connection) -> None:
@@ -365,10 +408,10 @@ def create_session(user_id: int) -> str:
     with DB_LOCK, db_connect() as connection:
         connection.execute(
             """
-            INSERT INTO sessions (token, user_id, created_at, expires_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO sessions (token, user_id, created_at, last_seen_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (token, user_id, now.isoformat(), expires_at.isoformat()),
+            (token, user_id, now.isoformat(), now.isoformat(), expires_at.isoformat()),
         )
         connection.commit()
     return token
@@ -395,6 +438,12 @@ def authenticate_request(request: Request) -> dict[str, Any] | None:
             """,
             (token, utc_now()),
         ).fetchone()
+        if row:
+            connection.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE token = ?",
+                (utc_now(), token),
+            )
+            connection.commit()
     if not row:
         return None
     user = serialize_user(row)
@@ -556,6 +605,249 @@ def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
     return serialize_user(row)
 
 
+def create_analysis_run(
+    user: dict[str, Any],
+    ip_address: str,
+    target: str,
+    engine: str,
+    validation_mode: str,
+    proof_authorized: bool,
+    requested_run_id: str = "",
+) -> str:
+    run_id = sanitize_run_id(requested_run_id) or uuid.uuid4().hex
+    now = utc_now()
+    with DB_LOCK, db_connect() as connection:
+        try:
+            connection.execute(
+                """
+                INSERT INTO analysis_runs (
+                    id, user_id, username, user_plan, ip_address, target, engine,
+                    validation_mode, proof_authorized, status, started_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                """,
+                (
+                    run_id,
+                    int(user["id"]),
+                    str(user["username"]),
+                    str(user["plan"]["id"]),
+                    ip_address,
+                    target,
+                    engine,
+                    validation_mode,
+                    1 if proof_authorized else 0,
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            run_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO analysis_runs (
+                    id, user_id, username, user_plan, ip_address, target, engine,
+                    validation_mode, proof_authorized, status, started_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                """,
+                (
+                    run_id,
+                    int(user["id"]),
+                    str(user["username"]),
+                    str(user["plan"]["id"]),
+                    ip_address,
+                    target,
+                    engine,
+                    validation_mode,
+                    1 if proof_authorized else 0,
+                    now,
+                    now,
+                ),
+            )
+        connection.commit()
+    return run_id
+
+
+def sanitize_run_id(value: str) -> str:
+    run_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))[:64]
+    return run_id if len(run_id) >= 8 else ""
+
+
+def is_run_cancelled(run_id: str | None) -> bool:
+    return bool(run_id and run_id in CANCELLED_RUNS)
+
+
+def cancel_analysis_run(run_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    clean_run_id = sanitize_run_id(run_id)
+    if not clean_run_id:
+        raise HTTPException(status_code=400, detail="Invalid run id.")
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT id, user_id, status FROM analysis_runs WHERE id = ?",
+            (clean_run_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        if not user.get("is_admin") and int(row["user_id"]) != int(user["id"]):
+            raise HTTPException(status_code=403, detail="Run access denied.")
+        if row["status"] in {"completed", "failed", "blocked", "cancelled"}:
+            return {"ok": True, "run_id": clean_run_id, "status": row["status"]}
+        CANCELLED_RUNS.add(clean_run_id)
+        connection.execute(
+            """
+            UPDATE analysis_runs
+            SET status = 'cancelled', completed_at = ?, updated_at = ?, error = ?
+            WHERE id = ?
+            """,
+            (utc_now(), utc_now(), "Cancelled by user.", clean_run_id),
+        )
+        connection.commit()
+    return {"ok": True, "run_id": clean_run_id, "status": "cancelled"}
+
+
+def update_analysis_run(run_id: str | None, **fields: Any) -> None:
+    if not run_id or not fields:
+        return
+    allowed_fields = {
+        "status",
+        "quota_plan",
+        "quota_limit",
+        "quota_remaining",
+        "score",
+        "critical",
+        "high",
+        "medium",
+        "low",
+        "error",
+        "completed_at",
+        "duration_ms",
+    }
+    assignments = []
+    values: list[Any] = []
+    for key, value in fields.items():
+        if key not in allowed_fields:
+            continue
+        assignments.append(f"{key} = ?")
+        values.append(value)
+    if not assignments:
+        return
+    assignments.append("updated_at = ?")
+    values.append(utc_now())
+    values.append(run_id)
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            f"UPDATE analysis_runs SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        connection.commit()
+
+
+def finish_analysis_run(
+    run_id: str | None,
+    status: str,
+    duration_ms: int,
+    report: dict[str, Any] | None = None,
+    error: str = "",
+) -> None:
+    if is_run_cancelled(run_id) and status != "cancelled":
+        return
+    counts = (report or {}).get("summary") or (report or {}).get("severity_counts") or {}
+    update_analysis_run(
+        run_id,
+        status=status,
+        duration_ms=duration_ms,
+        completed_at=utc_now(),
+        score=int((report or {}).get("score") or counts.get("score") or 0),
+        critical=int(counts.get("critical") or 0),
+        high=int(counts.get("high") or 0),
+        medium=int(counts.get("medium") or 0),
+        low=int(counts.get("low") or counts.get("light") or 0),
+        error=error[:1000],
+    )
+
+
+def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def admin_dashboard_payload() -> dict[str, Any]:
+    now = utc_now()
+    with DB_LOCK, db_connect() as connection:
+        user_rows = connection.execute(
+            """
+            SELECT
+                users.id,
+                users.username,
+                users.email,
+                users.provider,
+                users.plan,
+                users.is_admin,
+                users.created_at,
+                users.updated_at,
+                COUNT(DISTINCT sessions.token) AS active_sessions,
+                MAX(sessions.last_seen_at) AS last_seen_at,
+                COUNT(DISTINCT analysis_runs.id) AS total_runs,
+                SUM(CASE WHEN analysis_runs.status = 'running' THEN 1 ELSE 0 END) AS running_runs,
+                MAX(analysis_runs.updated_at) AS last_run_at
+            FROM users
+            LEFT JOIN sessions
+                ON sessions.user_id = users.id AND sessions.expires_at > ?
+            LEFT JOIN analysis_runs
+                ON analysis_runs.user_id = users.id
+            GROUP BY users.id
+            ORDER BY users.created_at DESC
+            LIMIT 200
+            """,
+            (now,),
+        ).fetchall()
+        run_rows = connection.execute(
+            """
+            SELECT *
+            FROM analysis_runs
+            ORDER BY started_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        live_rows = connection.execute(
+            """
+            SELECT *
+            FROM analysis_runs
+            WHERE status IN ('queued', 'running')
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        usage_rows = connection.execute(
+            """
+            SELECT subject, engine, period_key, count, updated_at
+            FROM usage_counters
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+        summary = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users) AS users,
+                (SELECT COUNT(*) FROM sessions WHERE expires_at > ?) AS active_sessions,
+                (SELECT COUNT(*) FROM analysis_runs) AS runs,
+                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
+                (SELECT COUNT(*) FROM analysis_runs WHERE status = 'completed') AS completed_runs,
+                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('failed', 'blocked')) AS problem_runs
+            """,
+            (now,),
+        ).fetchone()
+
+    return {
+        "summary": row_to_dict(summary),
+        "users": [row_to_dict(row) for row in user_rows],
+        "live_runs": [row_to_dict(row) for row in live_rows],
+        "recent_runs": [row_to_dict(row) for row in run_rows],
+        "usage": [row_to_dict(row) for row in usage_rows],
+        "generated_at": now,
+    }
+
+
 app = FastAPI(title="Aegis Autonomous Hosting & Security Analyst")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 init_db()
@@ -677,10 +969,24 @@ def api_update_plan(request: Request, payload: PlanRequest) -> dict[str, Any]:
     return {"user": update_user_plan(int(user["id"]), payload.plan)}
 
 
+@app.get("/api/admin/dashboard")
+def api_admin_dashboard(request: Request) -> dict[str, Any]:
+    user = require_user(request)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return admin_dashboard_payload()
+
+
+@app.post("/api/analyze/{run_id}/cancel")
+def api_cancel_analysis(run_id: str, request: Request) -> dict[str, Any]:
+    user = require_user(request)
+    return cancel_analysis_run(run_id, user)
+
+
 @app.post("/api/analyze")
 async def analyze(request: Request, payload: AnalysisRequest) -> StreamingResponse:
     return StreamingResponse(
-        run_analysis(payload, authenticate_request(request), client_ip(request)),
+        run_analysis(payload, authenticate_request(request), client_ip(request), request),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache"},
     )
@@ -690,9 +996,32 @@ async def run_analysis(
     payload: AnalysisRequest,
     auth_context: dict[str, Any] | None,
     ip_address: str,
+    request: Request,
 ):
     started_at = time.perf_counter()
     steps: list[dict[str, Any]] = []
+    run_id: str | None = None
+
+    async def stop_requested() -> bool:
+        return is_run_cancelled(run_id) or await request.is_disconnected()
+
+    async def cancellation_event_if_needed() -> str:
+        if not await stop_requested():
+            return ""
+        finish_analysis_run(
+            run_id,
+            "cancelled",
+            int((time.perf_counter() - started_at) * 1000),
+            error="Cancelled by user.",
+        )
+        return event(
+            "cancelled",
+            {
+                "message": "Analysis cancelled.",
+                "run_id": run_id,
+                "duration_ms": int((time.perf_counter() - started_at) * 1000),
+            },
+        )
 
     def record_step(
         step_id: str,
@@ -747,11 +1076,38 @@ async def run_analysis(
                 {"message": "Proof mode requires separate reversible-proof authorization."},
             )
             return
+        run_id = create_analysis_run(
+            auth_context,
+            ip_address,
+            target_url,
+            selected_engine,
+            validation_mode,
+            payload.proof_authorized,
+            payload.client_run_id,
+        )
+        yield event("run", {"run_id": run_id})
         quota = reserve_usage(auth_context, ip_address, selected_engine)
         yield event("quota", quota)
         if not quota.get("allowed"):
+            update_analysis_run(
+                run_id,
+                status="blocked",
+                quota_plan=str(quota.get("plan") or ""),
+                quota_limit=quota.get("limit"),
+                quota_remaining=quota.get("remaining"),
+                error=str(quota.get("message") or "Quota exceeded."),
+                completed_at=utc_now(),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            )
             yield event("error", {"message": quota.get("message", "Quota exceeded.")})
             return
+        update_analysis_run(
+            run_id,
+            status="running",
+            quota_plan=str(quota.get("plan") or ""),
+            quota_limit=quota.get("limit"),
+            quota_remaining=quota.get("remaining"),
+        )
         step.update(
             {
                 "status": "complete",
@@ -766,6 +1122,10 @@ async def run_analysis(
             }
         )
         yield event("step", step)
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
 
         if selected_engine in {"aegis", "sheepstealer"}:
             is_sheepstealer = selected_engine == "sheepstealer"
@@ -790,6 +1150,7 @@ async def run_analysis(
             )
             yield event("step", step)
             direct_started_at = time.perf_counter()
+            last_direct_update = 0.0
             llm_task = asyncio.create_task(
                 asyncio.to_thread(
                     call_sheepstealer_direct_pentest
@@ -801,9 +1162,17 @@ async def run_analysis(
                 )
             )
             while not llm_task.done():
-                await asyncio.sleep(15)
+                await asyncio.sleep(2)
+                cancelled_event = await cancellation_event_if_needed()
+                if cancelled_event:
+                    llm_task.cancel()
+                    yield cancelled_event
+                    return
                 if llm_task.done():
                     break
+                if time.perf_counter() - last_direct_update < 15:
+                    continue
+                last_direct_update = time.perf_counter()
                 elapsed_label = human_duration(
                     int((time.perf_counter() - direct_started_at) * 1000)
                 )
@@ -818,6 +1187,10 @@ async def run_analysis(
                 )
                 yield event("step", step)
             llm_context = await llm_task
+            cancelled_event = await cancellation_event_if_needed()
+            if cancelled_event:
+                yield cancelled_event
+                return
             step.update(
                 {
                     "status": "complete",
@@ -851,6 +1224,7 @@ async def run_analysis(
                 ),
                 reason_phrase="sheepstealer" if is_sheepstealer else "Aegis Engine",
             )
+            finish_analysis_run(run_id, "completed", elapsed_ms, direct_report)
             yield event("metrics", direct_report["summary"])
             yield event("report", direct_report)
             yield event("done", {"duration_ms": elapsed_ms})
@@ -873,6 +1247,10 @@ async def run_analysis(
             }
         )
         yield event("step", step)
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
 
         step = record_step(
             "http",
@@ -899,6 +1277,10 @@ async def run_analysis(
             }
         )
         yield event("step", step)
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
 
         tls_context: dict[str, Any] = {"enabled": False, "skipped": True}
         parsed_final = urlparse(http_context["final_url"])
@@ -928,6 +1310,10 @@ async def run_analysis(
             )
             step.update({"status": "complete", "detail": detail, "result": tls_context})
             yield event("step", step)
+            cancelled_event = await cancellation_event_if_needed()
+            if cancelled_event:
+                yield cancelled_event
+                return
 
         step = record_step(
             "surface",
@@ -956,6 +1342,10 @@ async def run_analysis(
             }
         )
         yield event("step", step)
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
 
         step = record_step(
             "headers",
@@ -987,6 +1377,10 @@ async def run_analysis(
         )
         yield event("step", step)
         yield event("metrics", local_report["summary"])
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
 
         step = record_step(
             "llm",
@@ -997,6 +1391,10 @@ async def run_analysis(
         )
         yield event("step", step)
         llm_context = await asyncio.to_thread(call_llm, target_url, local_report)
+        cancelled_event = await cancellation_event_if_needed()
+        if cancelled_event:
+            yield cancelled_event
+            return
         llm_detail = build_llm_step_detail(llm_context)
         llm_summary = llm_preview(llm_context.get("content", ""))
         step.update(
@@ -1017,10 +1415,17 @@ async def run_analysis(
         local_report["llm"] = llm_context
         local_report["steps"] = steps
         local_report["duration_ms"] = elapsed_ms
+        finish_analysis_run(run_id, "completed", elapsed_ms, local_report)
         yield event("report", local_report)
         yield event("done", {"duration_ms": elapsed_ms})
 
     except Exception as exc:
+        finish_analysis_run(
+            run_id,
+            "failed",
+            int((time.perf_counter() - started_at) * 1000),
+            error=str(exc),
+        )
         yield event("error", {"message": str(exc)})
 
 
