@@ -7,3 +7,4 @@ __pycache__/
 aegis.sqlite3
 aegis.sqlite3-*
 aegis-uvicorn-*.log
+marketing-video/node_modules/

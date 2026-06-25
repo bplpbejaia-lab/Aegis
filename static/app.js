@@ -19,6 +19,18 @@ const signupPlanInput = document.querySelector("#signup-plan");
 const accountPlanInput = document.querySelector("#account-plan");
 const accountName = document.querySelector("#account-name");
 const accountPlanLabel = document.querySelector("#account-plan-label");
+const accountQuotaCard = document.querySelector("#account-quota-card");
+const profileCard = document.querySelector("#profile-card");
+const profileAvatar = document.querySelector("#profile-avatar");
+const profileName = document.querySelector("#profile-name");
+const profilePlan = document.querySelector("#profile-plan");
+const sidebarQuota = document.querySelector("#sidebar-quota");
+const workspaceHistory = document.querySelector("#workspace-history");
+const aegisPreorderCard = document.querySelector("#aegis-preorder-card");
+const aegisPreorderStatus = document.querySelector("#aegis-preorder-status");
+const preorderModal = document.querySelector("#preorder-modal");
+const preorderMessage = document.querySelector("#preorder-message");
+const confirmAelyxPreorderButton = document.querySelector("#confirm-aegis-preorder");
 const adminDashboard = document.querySelector("#admin-dashboard");
 const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashboard");
 const adminSummary = document.querySelector("#admin-summary");
@@ -58,6 +70,8 @@ const navActions = document.querySelectorAll("[data-nav-target]");
 const closeReportTriggers = document.querySelectorAll("[data-close-report]");
 const closeAuthTriggers = document.querySelectorAll("[data-close-auth]");
 const closeAccountTriggers = document.querySelectorAll("[data-close-account]");
+const closePreorderTriggers = document.querySelectorAll("[data-close-preorder]");
+const passwordToggles = document.querySelectorAll(".password-toggle");
 const reportSearchInput = document.querySelector(".report-search input");
 const thinkingModal = document.querySelector("#thinking-modal");
 const closeThinkingTriggers = document.querySelectorAll("[data-close-thinking]");
@@ -76,10 +90,11 @@ let runStartedAt = 0;
 let timer = null;
 let currentReport = null;
 let currentUser = null;
-let appConfig = { plans: [], google_client_id: "" };
+let appConfig = { plans: [], google_client_id: "", proof_mode_launched: false };
 let currentRunId = "";
 let currentRunController = null;
 let isStoppingRun = false;
+let currentQuotaSummary = null;
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -92,6 +107,7 @@ async function initializeApp() {
   targetInput?.focus();
   setReportNavReady(false);
   updateProofConsentVisibility();
+  initializeCustomSelects();
   await loadConfig();
   await restoreSession();
   initializeGoogleSignIn();
@@ -117,6 +133,42 @@ sessionButton?.addEventListener("click", () => {
   }
 });
 
+profileCard?.addEventListener("click", () => {
+  if (currentUser) {
+    openAccountModal();
+  } else {
+    openAuthModal("login");
+  }
+});
+
+aegisPreorderCard?.addEventListener("click", () => {
+  openPreorderModal();
+});
+
+confirmAelyxPreorderButton?.addEventListener("click", () => {
+  preorderAelyxAccess();
+});
+
+workspaceHistory?.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-workspace-target]");
+  if (!item) return;
+  targetInput.value = item.dataset.workspaceTarget || "";
+  if (item.dataset.workspaceEngine && analysisEngineInput) {
+    analysisEngineInput.value = item.dataset.workspaceEngine;
+    analysisEngineInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (item.dataset.workspaceMode && validationModeInput) {
+    validationModeInput.value = item.dataset.workspaceMode;
+    validationModeInput.dispatchEvent(new Event("change", { bubbles: true }));
+    updateProofConsentVisibility();
+  }
+  focusTargetInput();
+});
+
+passwordToggles.forEach((toggle) => {
+  toggle.addEventListener("click", () => togglePasswordVisibility(toggle));
+});
+
 authTabs.forEach((tab) => {
   tab.addEventListener("click", () => switchAuthTab(tab.dataset.authTab || "login"));
 });
@@ -136,7 +188,7 @@ signupForm?.addEventListener("submit", async (event) => {
   await authenticate("/api/auth/signup", {
     username: formData.get("username"),
     password: formData.get("password"),
-    plan: formData.get("plan") || "free",
+    plan: signupPlanInput?.value || "sheepstealer_daily",
   });
 });
 
@@ -171,7 +223,7 @@ logoutButton?.addEventListener("click", async () => {
 
 googleFallback?.addEventListener("click", () => {
   if (!appConfig.google_client_id) {
-    showAuthMessage("Google sign-in is not configured. Add GOOGLE_CLIENT_ID in .env and restart Aegis.", true);
+    showAuthMessage("Google sign-in is not configured. Add GOOGLE_CLIENT_ID in .env and restart Aelyx.", true);
     return;
   }
   if (window.google?.accounts?.id) {
@@ -211,6 +263,10 @@ closeAccountTriggers.forEach((trigger) => {
   trigger.addEventListener("click", closeAccountModal);
 });
 
+closePreorderTriggers.forEach((trigger) => {
+  trigger.addEventListener("click", closePreorderModal);
+});
+
 closeThinkingTriggers.forEach((trigger) => {
   trigger.addEventListener("click", hideThinkingModal);
 });
@@ -220,6 +276,7 @@ document.addEventListener("keydown", (event) => {
   closeReportModal();
   closeAuthModal();
   closeAccountModal();
+  closePreorderModal();
 });
 
 traceList?.addEventListener("click", (event) => {
@@ -242,6 +299,7 @@ async function loadConfig() {
   try {
     appConfig = await apiJson("/api/config", { auth: false });
     renderPlanOptions();
+    syncAllCustomSelects();
   } catch (error) {
     showAuthMessage(`Config unavailable: ${error.message}`, true);
   }
@@ -314,10 +372,15 @@ function renderPlanOptions() {
       const limits = plan.limits || {};
       const aegis = formatLimit(limits.aegis);
       const sheepstealer = formatLimit(limits.sheepstealer);
-      return `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.label)} - Aegis ${escapeHtml(aegis)}, sheepstealer ${escapeHtml(sheepstealer)}</option>`;
+      return `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.label)} - Aelyx ${escapeHtml(aegis)}, sheepstealer ${escapeHtml(sheepstealer)}</option>`;
     })
     .join("");
-  if (signupPlanInput) signupPlanInput.innerHTML = optionHtml;
+  if (signupPlanInput) {
+    signupPlanInput.innerHTML = optionHtml;
+    signupPlanInput.value = plans.some((plan) => plan.id === "sheepstealer_daily")
+      ? "sheepstealer_daily"
+      : plans[0]?.id || "free";
+  }
   if (accountPlanInput) accountPlanInput.innerHTML = optionHtml;
 }
 
@@ -327,6 +390,114 @@ function formatLimit(limit) {
   return `${limit.limit}/${limit.period}`;
 }
 
+function hasAelyxPlanAccess() {
+  if (currentUser?.is_admin) return true;
+  const aegisLimit = currentUser?.plan?.limits?.aegis?.limit;
+  return aegisLimit === null || Number(aegisLimit || 0) > 0;
+}
+
+function isProofModeLocked() {
+  return !(appConfig.proof_mode_launched && hasAelyxPlanAccess());
+}
+
+function initializeCustomSelects() {
+  document.querySelectorAll(".select-shell select").forEach((select) => {
+    const shell = select.closest(".select-shell");
+    if (!shell || shell.querySelector(".custom-select")) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "custom-select";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+
+    const menu = document.createElement("div");
+    menu.className = "custom-select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+
+    Array.from(select.options).forEach((option) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "custom-select-option";
+      item.setAttribute("role", "option");
+      item.dataset.value = option.value;
+      if (select.id === "validation-mode" && option.value === "proof") {
+        item.classList.add("is-locked");
+      }
+      item.textContent = option.textContent;
+      item.addEventListener("click", () => {
+        if (select.id === "validation-mode" && option.value === "proof" && isProofModeLocked()) {
+          syncCustomSelect(shell);
+          closeCustomSelect(shell);
+          openPreorderModal();
+          return;
+        }
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        syncCustomSelect(shell);
+        closeCustomSelect(shell);
+      });
+      menu.appendChild(item);
+    });
+
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const isOpen = !menu.hidden;
+      closeAllCustomSelects();
+      if (!isOpen) openCustomSelect(shell);
+    });
+
+    select.addEventListener("change", () => syncCustomSelect(shell));
+    shell.append(button, menu);
+    syncCustomSelect(shell);
+  });
+}
+
+function syncCustomSelect(shell) {
+  const select = shell?.querySelector("select");
+  const button = shell?.querySelector(".custom-select");
+  const menu = shell?.querySelector(".custom-select-menu");
+  if (!select || !button || !menu) return;
+  const selected = select.options[select.selectedIndex];
+  button.textContent = selected?.textContent || "";
+  menu.querySelectorAll(".custom-select-option").forEach((item) => {
+    const isSelected = item.dataset.value === select.value;
+    const isLocked = select.id === "validation-mode" && item.dataset.value === "proof" && isProofModeLocked();
+    item.classList.toggle("is-selected", isSelected);
+    item.classList.toggle("is-locked", isLocked);
+    item.setAttribute("aria-selected", String(isSelected));
+    item.dataset.locked = String(isLocked);
+  });
+}
+
+function openCustomSelect(shell) {
+  const button = shell?.querySelector(".custom-select");
+  const menu = shell?.querySelector(".custom-select-menu");
+  if (!button || !menu) return;
+  menu.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+  shell.classList.add("is-open");
+}
+
+function closeCustomSelect(shell) {
+  const button = shell?.querySelector(".custom-select");
+  const menu = shell?.querySelector(".custom-select-menu");
+  if (!button || !menu) return;
+  menu.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  shell.classList.remove("is-open");
+}
+
+function closeAllCustomSelects() {
+  document.querySelectorAll(".select-shell.is-open").forEach((shell) => closeCustomSelect(shell));
+}
+
+function syncAllCustomSelects() {
+  document.querySelectorAll(".select-shell").forEach((shell) => syncCustomSelect(shell));
+}
+
+document.addEventListener("click", closeAllCustomSelects);
+
 function renderSession() {
   const signedIn = Boolean(currentUser);
   if (sessionButton) {
@@ -335,10 +506,16 @@ function renderSession() {
       : "Sign in";
     sessionButton.classList.toggle("is-authenticated", signedIn);
   }
+  renderProfileCard();
+  renderAelyxPreorderState();
+  syncAllCustomSelects();
   if (!signedIn) {
     closeAccountModal();
     if (adminDashboard) adminDashboard.hidden = true;
     showAuthMessage("Use your workspace account to continue.", false);
+    currentQuotaSummary = null;
+    renderQuotaSummary(null);
+    renderWorkspaceHistory([]);
     return;
   }
   const plan = currentUser.plan || {};
@@ -349,7 +526,188 @@ function renderSession() {
     accountPlanInput.disabled = Boolean(currentUser.is_admin);
   }
   if (adminDashboard) adminDashboard.hidden = !currentUser.is_admin;
+  loadAccountQuota();
+  loadWorkspaceHistory();
   if (currentUser.is_admin) loadAdminDashboard();
+}
+
+function renderProfileCard() {
+  const signedIn = Boolean(currentUser);
+  const username = signedIn ? currentUser.username : "Guest session";
+  const plan = currentUser?.is_admin ? "Unlimited admin" : currentUser?.plan?.label || "Pre-registration";
+  if (profileName) profileName.textContent = username;
+  if (profilePlan) profilePlan.textContent = plan;
+  if (profileAvatar) profileAvatar.textContent = (username || "A").slice(0, 1).toUpperCase();
+  profileCard?.classList.toggle("is-authenticated", signedIn);
+}
+
+function renderAelyxPreorderState() {
+  const isRegistered = Boolean(currentUser?.aegis_waitlist_at);
+  if (aegisPreorderStatus) {
+    aegisPreorderStatus.textContent = isRegistered
+      ? "You are pre-registered"
+      : "Pre-register for launch perks";
+  }
+  aegisPreorderCard?.classList.toggle("is-registered", isRegistered);
+  if (confirmAelyxPreorderButton) {
+    confirmAelyxPreorderButton.textContent = isRegistered ? "Already pre-registered" : "Pre-register Aelyx";
+    confirmAelyxPreorderButton.disabled = isRegistered;
+  }
+  if (preorderMessage) {
+    preorderMessage.textContent = isRegistered
+      ? "Aelyx early access is reserved for this account."
+      : "Current default remains sheepstealer.";
+    preorderMessage.classList.remove("error");
+  }
+}
+
+async function loadAccountQuota() {
+  if (!currentUser) return;
+  try {
+    currentQuotaSummary = await apiJson("/api/account/quota");
+    renderQuotaSummary(currentQuotaSummary);
+  } catch {
+    renderQuotaSummary(null);
+  }
+}
+
+function renderQuotaSummary(summary) {
+  if (!currentUser) {
+    if (sidebarQuota) sidebarQuota.textContent = "Default access: sheepstealer";
+    renderAccountQuotaCard("Quota left", "Sign in to view", "Pre-registration uses sheepstealer by default.");
+    return;
+  }
+  if (currentUser.is_admin) {
+    if (sidebarQuota) sidebarQuota.textContent = "Quota: unlimited admin";
+    renderAccountQuotaCard("Quota left", "Unlimited", "Admin tester access is active.");
+    return;
+  }
+  const sheep = summary?.quotas?.sheepstealer;
+  if (sheep?.limit === null) {
+    if (sidebarQuota) sidebarQuota.textContent = "sheepstealer: unlimited";
+    renderAccountQuotaCard("sheepstealer quota", "Unlimited", "No daily cap on the current plan.");
+    return;
+  }
+  if (sheep) {
+    const quotaLabel = `${sheep.remaining}/${sheep.limit} left`;
+    if (sidebarQuota) sidebarQuota.textContent = `sheepstealer: ${quotaLabel} ${sheep.period}`;
+    renderAccountQuotaCard("sheepstealer quota", quotaLabel, `Resets every ${sheep.period}.`);
+    return;
+  }
+  if (sidebarQuota) sidebarQuota.textContent = "sheepstealer quota loading";
+  renderAccountQuotaCard("Quota left", "Loading", "Refreshing account usage.");
+}
+
+function renderAccountQuotaCard(label, value, detail) {
+  if (!accountQuotaCard) return;
+  accountQuotaCard.innerHTML = `
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(value)}</strong>
+    <small>${escapeHtml(detail)}</small>
+  `;
+}
+
+async function loadWorkspaceHistory() {
+  if (!currentUser) {
+    renderWorkspaceHistory([]);
+    return;
+  }
+  try {
+    const data = await apiJson("/api/account/runs?limit=6");
+    renderWorkspaceHistory(data.runs || []);
+  } catch {
+    renderWorkspaceHistory([]);
+  }
+}
+
+function renderWorkspaceHistory(runs) {
+  if (!workspaceHistory) return;
+  if (!currentUser) {
+    workspaceHistory.innerHTML = '<li class="workspace-empty">Sign in to see recent scans.</li>';
+    return;
+  }
+  if (!runs.length) {
+    workspaceHistory.innerHTML = '<li class="workspace-empty">No scans yet. Run your first target.</li>';
+    return;
+  }
+  workspaceHistory.innerHTML = runs
+    .map((run) => {
+      const target = run.target || "";
+      const host = compactUrl(target);
+      const status = run.status || "queued";
+      const score = Number(run.score || 0);
+      const scoreLabel = score ? `${score}` : status;
+      return `
+        <li>
+          <button
+            type="button"
+            data-workspace-target="${escapeHtml(target)}"
+            data-workspace-engine="${escapeHtml(run.engine || "sheepstealer")}"
+            data-workspace-mode="${escapeHtml(run.validation_mode || "safe")}"
+          >
+            <span class="workspace-dot status-${escapeHtml(status)}"></span>
+            <span class="workspace-copy">
+              <strong>${escapeHtml(host || target || "Target")}</strong>
+              <small>${escapeHtml(run.engine || "engine")} / ${escapeHtml(relativeTime(run.updated_at || run.started_at))}</small>
+            </span>
+            <em>${escapeHtml(scoreLabel)}</em>
+          </button>
+        </li>
+      `;
+    })
+    .join("");
+}
+
+function togglePasswordVisibility(toggle) {
+  const field = toggle.closest(".password-field");
+  const input = field?.querySelector("input");
+  if (!input) return;
+  const isHidden = input.type === "password";
+  input.type = isHidden ? "text" : "password";
+  toggle.setAttribute("aria-pressed", String(isHidden));
+  toggle.setAttribute("aria-label", isHidden ? "Hide password" : "Show password");
+}
+
+function openPreorderModal() {
+  if (!currentUser) {
+    openAuthModal("signup");
+    showAuthMessage("Create an account first, then pre-register Aelyx.", false);
+    return;
+  }
+  closeAuthModal();
+  closeAccountModal();
+  if (!preorderModal) return;
+  renderAelyxPreorderState();
+  preorderModal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closePreorderModal() {
+  if (!preorderModal) return;
+  preorderModal.hidden = true;
+  if (reportModal?.hidden !== false && authModal?.hidden !== false && accountModal?.hidden !== false) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+async function preorderAelyxAccess() {
+  if (!currentUser) {
+    openAuthModal("signup");
+    return;
+  }
+  if (confirmAelyxPreorderButton) confirmAelyxPreorderButton.disabled = true;
+  try {
+    const data = await apiJson("/api/account/aegis-preorder", { method: "POST" });
+    currentUser = data.user;
+    renderSession();
+    renderAelyxPreorderState();
+  } catch (error) {
+    if (preorderMessage) {
+      preorderMessage.textContent = error.message;
+      preorderMessage.classList.add("error");
+    }
+    if (confirmAelyxPreorderButton) confirmAelyxPreorderButton.disabled = false;
+  }
 }
 
 function openAuthModal(tab = "login") {
@@ -531,10 +889,10 @@ function showAuthMessage(message, isError = false) {
 }
 
 function initializeGoogleSignIn() {
+  if (googleSignin) googleSignin.hidden = true;
   if (!appConfig.google_client_id) {
     googleFallback?.classList.add("needs-config");
     googleFallback?.removeAttribute("disabled");
-    if (googleSignin) googleSignin.hidden = true;
     return;
   }
   if (!googleSignin || !window.google?.accounts?.id) {
@@ -545,27 +903,20 @@ function initializeGoogleSignIn() {
   window.google.accounts.id.initialize({
     client_id: appConfig.google_client_id,
     callback: async (response) => {
-      const plan = signupPlanInput?.value || "free";
+      const plan = signupPlanInput?.value || "sheepstealer_daily";
       await authenticate("/api/auth/google", {
         credential: response.credential,
         plan,
       });
     },
   });
-  window.google.accounts.id.renderButton(googleSignin, {
-    type: "standard",
-    theme: "outline",
-    size: "large",
-    text: "continue_with",
-    shape: "pill",
-  });
-  if (googleFallback) googleFallback.hidden = true;
-  if (googleSignin) googleSignin.hidden = false;
+  googleFallback?.classList.remove("is-loading");
+  googleFallback?.removeAttribute("disabled");
 }
 
 async function runAnalysis() {
   if (!currentUser) {
-    showError("Sign in or create an account before running Aegis.");
+    showError("Sign in or create an account before running Aelyx.");
     openAuthModal("login");
     return;
   }
@@ -590,9 +941,9 @@ async function runAnalysis() {
   if (stopButton) stopButton.hidden = false;
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
-  agentDetail.textContent = "Preparing Aegis tools.";
+  agentDetail.textContent = "Preparing Aelyx tools.";
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing Aegis tools.";
+  workDetail.textContent = "Preparing Aelyx tools.";
   showThinkingModal(target, analysisEngineInput?.value || "aegis");
 
   try {
@@ -688,6 +1039,10 @@ function markRunStopped() {
 }
 
 function updateProofConsentVisibility() {
+  if (validationModeInput?.value === "proof" && isProofModeLocked()) {
+    validationModeInput.value = "safe";
+    syncCustomSelect(validationModeInput.closest(".select-shell"));
+  }
   const isProofMode = validationModeInput?.value === "proof";
   if (proofConsentRow) proofConsentRow.hidden = !isProofMode;
   if (!isProofMode && proofAuthorizedInput) proofAuthorizedInput.checked = false;
@@ -722,12 +1077,16 @@ function handleEvent(message) {
     workDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workProgressLabel.textContent = "100%";
     hideThinkingModal();
+    loadWorkspaceHistory();
+    loadAccountQuota();
   }
   if (type === "error") {
     showError(data.message);
+    loadWorkspaceHistory();
   }
   if (type === "cancelled") {
     markRunStopped();
+    loadWorkspaceHistory();
   }
   if (type === "done") {
     elapsed.textContent = formatDuration(data.duration_ms);
@@ -751,8 +1110,8 @@ function resetRun(target) {
     <li class="chat-message assistant intro-message">
       <span class="message-avatar" aria-hidden="true">A</span>
       <div class="message-body">
-        <p class="assistant-kicker">Aegis research agent</p>
-        <p>Starting the live reasoning stream. Aegis tools will appear here as they run.</p>
+        <p class="assistant-kicker">Aelyx research agent</p>
+        <p>Starting the live reasoning stream. Aelyx tools will appear here as they run.</p>
       </div>
     </li>
   `;
@@ -808,7 +1167,7 @@ function renderStep(step) {
 
 function resetWorkBoard() {
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing Aegis tools.";
+  workDetail.textContent = "Preparing Aelyx tools.";
   workProgressLabel.textContent = "0%";
   workSteps.innerHTML = "";
 }
@@ -836,9 +1195,9 @@ function showThinkingModal(target, engine) {
   if (!thinkingModal) return;
   thinkingModal.hidden = false;
   thinkingTarget.textContent = target || "-";
-  thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aegis";
+  thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aelyx";
   thinkingQuota.textContent = "checking";
-  thinkingTitle.textContent = "Aegis is thinking";
+  thinkingTitle.textContent = "Aelyx is thinking";
   thinkingDetail.textContent = "Preparing the run.";
   thinkingProgressBar?.style.setProperty("--thinking-progress", "8%");
   setThinkingStage(0);
@@ -973,7 +1332,7 @@ function setReportModeLabels(report) {
   const kicker = reportModal?.querySelector(".modal-header .kicker");
   const isDirect = Boolean(report);
   const engineName = isDirect ? directEngineName(report) : "Agent";
-  if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Aegis report";
+  if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Aelyx report";
   const labels = isDirect
     ? [
         ["Report overview", `Parsed from raw ${engineName} output`],
@@ -1006,7 +1365,7 @@ function isDirectReport(report) {
 function directEngineName(report) {
   return ["sheepstealer_direct", "kimi_direct"].includes(report?.surface?.analysis_mode)
     ? "sheepstealer"
-    : "Aegis";
+    : "Aelyx";
 }
 
 function validationModeLabel(mode) {
@@ -1145,7 +1504,7 @@ function parseInlineSeverityFindings(raw) {
   return [findingFromBlock(raw, normalizeSeverity(fields.severity || "medium"), 1)];
 }
 
-function renderDirectFindings(parsed, engineName = "Aegis") {
+function renderDirectFindings(parsed, engineName = "Aelyx") {
   if (!parsed.findings.length) {
     return `<p class="panel-placeholder">No classified findings were parsed. The raw ${escapeHtml(engineName)} report is preserved below.</p>`;
   }
@@ -1257,7 +1616,7 @@ function firstParagraph(raw) {
   );
 }
 
-function directPostureLabel(counts, engineName = "Aegis") {
+function directPostureLabel(counts, engineName = "Aelyx") {
   if (counts.critical) return "Critical exposure";
   if (counts.high) return "High risk";
   if (counts.medium) return "Needs hardening";
@@ -1565,7 +1924,7 @@ function installLocalPreviewHook() {
       openReportModal();
       window.history.replaceState(null, "", window.location.pathname);
     } catch (error) {
-      console.warn("Invalid Aegis hash preview report.", error);
+      console.warn("Invalid Aelyx hash preview report.", error);
     }
   }
   try {
@@ -1576,7 +1935,7 @@ function installLocalPreviewHook() {
       openReportModal();
     }
   } catch (error) {
-    console.warn("Invalid Aegis preview report.", error);
+    console.warn("Invalid Aelyx preview report.", error);
   }
   document.addEventListener("aegis:preview-report", (event) => {
     if (!event.detail) return;

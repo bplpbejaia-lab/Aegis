@@ -43,8 +43,14 @@ PUBLIC_MODEL_LABEL = "sheepstealer"
 DATABASE_PATH = os.getenv("AEGIS_DB_PATH", os.path.join(APP_DIR, "aegis.sqlite3"))
 SESSION_TTL_DAYS = int(os.getenv("AEGIS_SESSION_TTL_DAYS", "30"))
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
-ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "").strip()
-ADMIN_PASSWORD = os.getenv("AEGIS_ADMIN_PASSWORD", "")
+ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "caraxes88").strip()
+ADMIN_PASSWORD = os.getenv("AEGIS_ADMIN_PASSWORD", "caraxes88")
+PROOF_MODE_LAUNCHED = os.getenv("AEGIS_PROOF_MODE_LAUNCHED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 ANALYSIS_MODE = os.getenv("AEGIS_ANALYSIS_MODE", "passive").strip().lower()
 HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
@@ -70,11 +76,12 @@ LLM_BASE_PROMPT = (
 )
 DB_LOCK = threading.Lock()
 CANCELLED_RUNS: set[str] = set()
+DEFAULT_PLAN = "sheepstealer_daily"
 PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
     "free": {
         "label": "Free",
         "price": "$0",
-        "description": "1 Aegis request per month, enforced by account and IP.",
+        "description": "1 Aelyx request per month, enforced by account and IP.",
         "limits": {
             "aegis": {"limit": 1, "period": "month"},
             "sheepstealer": {"limit": 0, "period": "day"},
@@ -92,7 +99,7 @@ PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
     "pro_3": {
         "label": "Pro $3",
         "price": "$3",
-        "description": "2 Aegis requests and 10 sheepstealer requests per day.",
+        "description": "2 Aelyx requests and 10 sheepstealer requests per day.",
         "limits": {
             "aegis": {"limit": 2, "period": "day"},
             "sheepstealer": {"limit": 10, "period": "day"},
@@ -116,12 +123,12 @@ class LoginRequest(BaseModel):
 
 
 class SignupRequest(LoginRequest):
-    plan: str = "free"
+    plan: str = DEFAULT_PLAN
 
 
 class GoogleAuthRequest(BaseModel):
     credential: str = Field(..., min_length=20)
-    plan: str = "free"
+    plan: str = DEFAULT_PLAN
 
 
 class PlanRequest(BaseModel):
@@ -248,8 +255,8 @@ def verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def normalize_plan(plan: str) -> str:
-    requested = str(plan or "free").strip().lower()
-    return requested if requested in PLAN_DEFINITIONS else "free"
+    requested = str(plan or DEFAULT_PLAN).strip().lower()
+    return requested if requested in PLAN_DEFINITIONS else DEFAULT_PLAN
 
 
 def plan_payload(plan_id: str, is_admin: bool = False) -> dict[str, Any]:
@@ -286,7 +293,8 @@ def init_db() -> None:
                 email TEXT NOT NULL DEFAULT '',
                 google_sub TEXT NOT NULL DEFAULT '',
                 provider TEXT NOT NULL DEFAULT 'local',
-                plan TEXT NOT NULL DEFAULT 'free',
+                plan TEXT NOT NULL DEFAULT 'sheepstealer_daily',
+                aegis_waitlist_at TEXT NOT NULL DEFAULT '',
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -340,6 +348,7 @@ def init_db() -> None:
             """
         )
         ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
         ensure_admin_user(connection)
         connection.commit()
 
@@ -390,13 +399,14 @@ def ensure_admin_user(connection: sqlite3.Connection) -> None:
 
 def serialize_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     is_admin = bool(row["is_admin"])
-    plan_id = str(row["plan"] or "free")
+    plan_id = str(row["plan"] or DEFAULT_PLAN)
     return {
         "id": row["id"],
         "username": row["username"],
         "email": row["email"],
         "provider": row["provider"],
         "is_admin": is_admin,
+        "aegis_waitlist_at": row["aegis_waitlist_at"] if "aegis_waitlist_at" in row.keys() else "",
         "plan": plan_payload(plan_id, is_admin),
     }
 
@@ -593,6 +603,65 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
     }
 
 
+def usage_snapshot(user: dict[str, Any], ip_address: str = "") -> dict[str, Any]:
+    if user.get("is_admin"):
+        return {
+            "plan": "admin",
+            "quotas": {
+                "aegis": {"limit": None, "remaining": None, "period": "unlimited", "used": 0},
+                "sheepstealer": {"limit": None, "remaining": None, "period": "unlimited", "used": 0},
+            },
+        }
+
+    plan_id = normalize_plan(user["plan"]["id"])
+    plan = PLAN_DEFINITIONS[plan_id]
+    quotas: dict[str, Any] = {}
+    with DB_LOCK, db_connect() as connection:
+        for engine, limit_config in plan["limits"].items():
+            limit = limit_config.get("limit")
+            period = str(limit_config.get("period") or "day")
+            if limit is None:
+                quotas[engine] = {
+                    "limit": None,
+                    "remaining": None,
+                    "period": "unlimited",
+                    "used": 0,
+                }
+                continue
+            numeric_limit = int(limit or 0)
+            key = period_key(period)
+            subjects = [f"user:{user['id']}"]
+            if plan_id == "free" and ip_address:
+                subjects.append(f"ip:{ip_address}")
+            counts = []
+            for subject in subjects:
+                row = connection.execute(
+                    """
+                    SELECT count FROM usage_counters
+                    WHERE subject = ? AND engine = ? AND period_key = ?
+                    """,
+                    (subject, engine, key),
+                ).fetchone()
+                counts.append(int(row["count"]) if row else 0)
+            used = max(counts or [0])
+            quotas[engine] = {
+                "limit": numeric_limit,
+                "remaining": max(0, numeric_limit - used),
+                "period": period,
+                "used": used,
+            }
+    return {"plan": plan_id, "quotas": quotas}
+
+
+def has_aegis_plan_access(user: dict[str, Any]) -> bool:
+    if user.get("is_admin"):
+        return True
+    plan_id = normalize_plan(user["plan"]["id"])
+    limit_config = PLAN_DEFINITIONS[plan_id]["limits"].get("aegis", {})
+    limit = limit_config.get("limit")
+    return limit is None or int(limit or 0) > 0
+
+
 def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
     plan_id = normalize_plan(plan)
     with DB_LOCK, db_connect() as connection:
@@ -770,6 +839,45 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]:
+    run_limit = max(1, min(int(limit or 8), 20))
+    query = """
+        SELECT
+            id, target, engine, validation_mode, status, score,
+            critical, high, medium, low, started_at, updated_at,
+            completed_at, duration_ms
+        FROM analysis_runs
+    """
+    params: tuple[Any, ...]
+    if user.get("is_admin"):
+        query += " ORDER BY started_at DESC LIMIT ?"
+        params = (run_limit,)
+    else:
+        query += " WHERE user_id = ? ORDER BY started_at DESC LIMIT ?"
+        params = (int(user["id"]), run_limit)
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(query, params).fetchall()
+    return {"runs": [row_to_dict(row) for row in rows]}
+
+
+def preorder_aegis(user_id: int) -> dict[str, Any]:
+    now = utc_now()
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute("SELECT aegis_waitlist_at FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        waitlist_at = str(row["aegis_waitlist_at"] or "")
+        if not waitlist_at:
+            waitlist_at = now
+            connection.execute(
+                "UPDATE users SET aegis_waitlist_at = ?, updated_at = ? WHERE id = ?",
+                (waitlist_at, now, user_id),
+            )
+            connection.commit()
+        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return serialize_user(updated)
+
+
 def admin_dashboard_payload() -> dict[str, Any]:
     now = utc_now()
     with DB_LOCK, db_connect() as connection:
@@ -848,7 +956,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
     }
 
 
-app = FastAPI(title="Aegis Autonomous Hosting & Security Analyst")
+app = FastAPI(title="Aelyx Autonomous Hosting & Security Analyst")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 init_db()
 
@@ -867,9 +975,10 @@ def health() -> dict[str, str]:
 def api_config() -> dict[str, Any]:
     return {
         "google_client_id": GOOGLE_CLIENT_ID,
+        "proof_mode_launched": PROOF_MODE_LAUNCHED,
         "plans": public_plans(),
         "engines": [
-            {"id": "aegis", "label": "Aegis"},
+            {"id": "aegis", "label": "Aelyx"},
             {"id": "sheepstealer", "label": "sheepstealer"},
         ],
     }
@@ -966,7 +1075,25 @@ def api_update_plan(request: Request, payload: PlanRequest) -> dict[str, Any]:
     user = require_user(request)
     if user["is_admin"]:
         return {"user": user}
-    return {"user": update_user_plan(int(user["id"]), payload.plan)}
+    raise HTTPException(status_code=403, detail="Plan changes open at launch.")
+
+
+@app.get("/api/account/quota")
+def api_account_quota(request: Request) -> dict[str, Any]:
+    user = require_user(request)
+    return usage_snapshot(user, client_ip(request))
+
+
+@app.get("/api/account/runs")
+def api_account_runs(request: Request, limit: int = 8) -> dict[str, Any]:
+    user = require_user(request)
+    return account_runs_payload(user, limit)
+
+
+@app.post("/api/account/aegis-preorder")
+def api_account_aegis_preorder(request: Request) -> dict[str, Any]:
+    user = require_user(request)
+    return {"user": preorder_aegis(int(user["id"]))}
 
 
 @app.get("/api/admin/dashboard")
@@ -1045,7 +1172,7 @@ async def run_analysis(
 
     try:
         if not auth_context:
-            yield event("error", {"message": "Sign in or create an account before running Aegis."})
+            yield event("error", {"message": "Sign in or create an account before running Aelyx."})
             return
 
         if not payload.authorized:
@@ -1070,6 +1197,19 @@ async def run_analysis(
         target_url = await asyncio.to_thread(normalize_target, payload.target)
         selected_engine = normalize_analysis_engine(payload.engine)
         validation_mode = normalize_validation_mode(payload.validation_mode)
+        if validation_mode == "proof" and not (
+            PROOF_MODE_LAUNCHED and has_aegis_plan_access(auth_context)
+        ):
+            yield event(
+                "error",
+                {
+                    "message": (
+                        "Proof mode is reserved for Aelyx users after launch. "
+                        "Pre-register for Aelyx early access first."
+                    )
+                },
+            )
+            return
         if validation_mode == "proof" and not payload.proof_authorized:
             yield event(
                 "error",
@@ -1133,13 +1273,13 @@ async def run_analysis(
             engine_title = (
                 "sheepstealer direct assessment"
                 if is_sheepstealer
-                else "Aegis direct assessment"
+                else "Aelyx direct assessment"
             )
             engine_tool = "sheepstealer_hf" if is_sheepstealer else "aegis_engine"
             engine_detail = (
                 "Passing the authorized target directly to sheepstealer for end-to-end analysis."
                 if is_sheepstealer
-                else "Passing the authorized target directly to Aegis for end-to-end analysis."
+                else "Passing the authorized target directly to Aelyx for end-to-end analysis."
             )
             step = record_step(
                 step_id,
@@ -1198,7 +1338,7 @@ async def run_analysis(
                     "result": {
                         "model": llm_context.get(
                             "model",
-                            PUBLIC_MODEL_LABEL if is_sheepstealer else "Aegis local engine",
+                            PUBLIC_MODEL_LABEL if is_sheepstealer else "Aelyx local engine",
                         ),
                         "skipped": llm_context.get("skipped", False),
                         "preview": llm_preview(llm_context.get("content", "")),
@@ -1220,9 +1360,9 @@ async def run_analysis(
                 technology=(
                     "sheepstealer direct analysis"
                     if is_sheepstealer
-                    else "Aegis direct analysis"
+                    else "Aelyx direct analysis"
                 ),
-                reason_phrase="sheepstealer" if is_sheepstealer else "Aegis Engine",
+                reason_phrase="sheepstealer" if is_sheepstealer else "Aelyx Engine",
             )
             finish_analysis_run(run_id, "completed", elapsed_ms, direct_report)
             yield event("metrics", direct_report["summary"])
@@ -1632,7 +1772,7 @@ def fetch_site(target_url: str, dns_context: dict[str, Any] | None = None) -> di
         return fetch_site_via_resolved_ip(target_url, dns_context, started_at)
 
     headers = {
-        "User-Agent": "AegisResearchAudit/1.0 (+passive-security-analysis)",
+        "User-Agent": "AelyxResearchAudit/1.0 (+passive-security-analysis)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
@@ -1714,7 +1854,7 @@ def fetch_site_via_resolved_ip(
                     request = (
                         f"GET {path} HTTP/1.1\r\n"
                         f"Host: {host_header}\r\n"
-                        "User-Agent: AegisResearchAudit/1.0 (+passive-security-analysis)\r\n"
+                        "User-Agent: AelyxResearchAudit/1.0 (+passive-security-analysis)\r\n"
                         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
                         "Accept-Encoding: identity\r\n"
                         "Connection: close\r\n\r\n"
@@ -2933,7 +3073,7 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
                 result = json.load(handle)
             return {
                 "skipped": False,
-                "model": result.get("model") or "Aegis local engine",
+                "model": result.get("model") or "Aelyx local engine",
                 "content": result.get("content", ""),
                 "prompt_preview": prompt[:900],
                 "credential_count": 1,
@@ -2947,9 +3087,9 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
             error = str(result.get("error") or "Local bridge worker failed.")
             return {
                 "skipped": True,
-                "model": result.get("model") or "Aegis local engine",
+                "model": result.get("model") or "Aelyx local engine",
                 "content": (
-                    "Aegis local engine failed. The report shell is still available. "
+                    "Aelyx local engine failed. The report shell is still available. "
                     f"Error: {error}"
                 ),
                 "prompt_preview": prompt[:900],
@@ -2963,9 +3103,9 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
 
     return {
         "skipped": True,
-        "model": "Aegis local engine",
+        "model": "Aelyx local engine",
         "content": (
-            "Aegis local engine timed out while waiting for the worker. The "
+            "Aelyx local engine timed out while waiting for the worker. The "
             "report shell is still available. Start "
             "local_llm_worker.py and retry, or increase AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS."
         ),
@@ -3058,12 +3198,12 @@ def build_direct_report(
     llm_context: dict[str, Any],
     steps: list[dict[str, Any]],
     elapsed_ms: int,
-    posture: str = "Aegis direct assessment",
+    posture: str = "Aelyx direct assessment",
     analysis_mode: str = "aegis_direct",
     validation_mode: str = "safe",
     proof_authorized: bool = False,
-    technology: str = "Aegis direct analysis",
-    reason_phrase: str = "Aegis Engine",
+    technology: str = "Aelyx direct analysis",
+    reason_phrase: str = "Aelyx Engine",
 ) -> dict[str, Any]:
     return {
         "target": target_url,
@@ -3117,7 +3257,7 @@ def build_aegis_direct_pentest_prompt(
 ) -> str:
     return build_direct_pentest_prompt(
         target_url,
-        "You are running as the Aegis local analysis engine.",
+        "You are running as the Aelyx local analysis engine.",
         "Use local command-line tools and safe scripts available in this environment to gather evidence.",
         validation_mode,
         proof_authorized,
@@ -3131,7 +3271,7 @@ def build_sheepstealer_direct_pentest_prompt(
 ) -> str:
     return build_direct_pentest_prompt(
         target_url,
-        "You are sheepstealer running as the selected Aegis analysis engine.",
+        "You are sheepstealer running as the selected Aelyx analysis engine.",
         "Do not use or assume any precomputed passive collector output; the backend only passed you the target.",
         validation_mode,
         proof_authorized,
@@ -3184,7 +3324,7 @@ def build_direct_pentest_prompt(
     validation_rules = build_validation_mode_rules(validation_mode, proof_authorized)
     return (
         f"{engine_intro} The user explicitly requested an "
-        "authorized security assessment of this target, and the Aegis UI authorization "
+        "authorized security assessment of this target, and the Aelyx UI authorization "
         "checkbox was required before this job was created.\n\n"
         f"Target scope: {target_url}\n\n"
         "Do the assessment end-to-end yourself. Do not rely on any precomputed backend "
@@ -3257,7 +3397,7 @@ def post_hf_router_json(token: str, path: str, payload: dict[str, Any]) -> dict[
     request_head = (
         f"POST {path} HTTP/1.1\r\n"
         f"Host: {HF_ROUTER_HOST}\r\n"
-        "User-Agent: AegisResearchAudit/1.0\r\n"
+        "User-Agent: AelyxResearchAudit/1.0\r\n"
         "Accept: application/json\r\n"
         "Accept-Encoding: identity\r\n"
         "Content-Type: application/json\r\n"
