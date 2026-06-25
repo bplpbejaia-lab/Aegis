@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Aegis Autonomous Hosting & Security Analyst</title>
-    <link rel="stylesheet" href="/static/styles.css?v=report-ui-5" />
+    <link rel="stylesheet" href="/static/styles.css?v=prod-polish-1" />
   </head>
   <body class="is-pristine">
     <div class="app-shell">
@@ -12,6 +12,7 @@
         <nav class="top-nav-inner">
           <a class="brand" href="/" aria-label="Aegis home">Aegis</a>
           <div class="nav-pills">
+            <button class="session-pill" id="session-button" type="button">Sign in</button>
             <button class="nav-action" type="button" data-nav-target="work">Work</button>
             <button class="nav-action" id="open-report" type="button">Report</button>
           </div>
@@ -60,7 +61,7 @@
                 <span>Engine</span>
                 <select id="analysis-engine" name="engine">
                   <option value="aegis" selected>Aegis</option>
-                  <option value="kimi">Kimi</option>
+                  <option value="sheepstealer">sheepstealer</option>
                 </select>
               </label>
               <label class="engine-row" for="validation-mode">
@@ -117,6 +118,93 @@
           </ol>
         </section>
       </main>
+    </div>
+
+    <div id="auth-modal" class="auth-screen" hidden>
+      <div class="auth-backdrop" data-close-auth></div>
+      <section class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+        <button class="auth-close" type="button" data-close-auth aria-label="Close">x</button>
+        <div class="auth-copy">
+          <p class="kicker">Aegis account</p>
+          <h2 id="auth-title">Sign in to continue</h2>
+          <p>Use your account before starting an assessment.</p>
+        </div>
+
+        <section class="auth-panel" id="auth-panel" aria-label="Account access">
+          <div class="auth-tabs">
+            <button type="button" class="auth-tab is-active" data-auth-tab="login">Log in</button>
+            <button type="button" class="auth-tab" data-auth-tab="signup">Sign up</button>
+          </div>
+
+          <form class="auth-form" id="login-form">
+            <label>
+              <span>Username</span>
+              <input name="username" autocomplete="username" required />
+            </label>
+            <label>
+              <span>Password</span>
+              <input name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button type="submit">Log in</button>
+          </form>
+
+          <form class="auth-form" id="signup-form" hidden>
+            <label>
+              <span>Username</span>
+              <input name="username" autocomplete="username" required />
+            </label>
+            <label>
+              <span>Password</span>
+              <input name="password" type="password" autocomplete="new-password" required />
+            </label>
+            <label>
+              <span>Plan</span>
+              <select name="plan" id="signup-plan"></select>
+            </label>
+            <button type="submit">Create account</button>
+          </form>
+
+          <div class="google-row">
+            <div id="google-signin"></div>
+            <button class="google-button" type="button" id="google-fallback">
+              <span class="google-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path fill="#4285F4" d="M21.6 12.23c0-.78-.07-1.53-.2-2.23H12v4.22h5.38a4.6 4.6 0 0 1-2 3.02v2.51h3.24c1.9-1.75 2.98-4.33 2.98-7.52Z" />
+                  <path fill="#34A853" d="M12 22c2.7 0 4.96-.9 6.62-2.45l-3.24-2.51c-.9.6-2.04.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H3.07v2.59A9.99 9.99 0 0 0 12 22Z" />
+                  <path fill="#FBBC05" d="M6.41 13.88A6.01 6.01 0 0 1 6.1 12c0-.65.11-1.28.31-1.88V7.53H3.07A9.99 9.99 0 0 0 2 12c0 1.61.39 3.14 1.07 4.47l3.34-2.59Z" />
+                  <path fill="#EA4335" d="M12 6c1.47 0 2.8.51 3.84 1.5l2.86-2.86C16.96 3.02 14.7 2 12 2a9.99 9.99 0 0 0-8.93 5.53l3.34 2.59C7.2 7.76 9.4 6 12 6Z" />
+                </svg>
+              </span>
+              <span>Continue with Google</span>
+            </button>
+          </div>
+          <p id="auth-message" class="auth-message">Use your workspace account to continue.</p>
+        </section>
+      </section>
+    </div>
+
+    <div id="account-modal" class="auth-screen" hidden>
+      <div class="auth-backdrop" data-close-account></div>
+      <section class="auth-dialog account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-title">
+        <button class="auth-close" type="button" data-close-account aria-label="Close">x</button>
+        <div class="auth-copy">
+          <p class="kicker">Current account</p>
+          <h2 id="account-title">Account and plan</h2>
+          <p>Review your active plan and quota access.</p>
+        </div>
+
+        <section class="account-panel" id="account-panel" aria-label="Current account">
+          <div>
+            <span id="account-name">Signed in</span>
+            <strong id="account-plan-label">Free</strong>
+          </div>
+          <label>
+            <span>Plan</span>
+            <select id="account-plan"></select>
+          </label>
+          <button type="button" id="logout-button">Logout</button>
+        </section>
+      </section>
     </div>
 
     <div id="report-modal" class="report-modal" hidden>
@@ -187,15 +275,48 @@
 
           <section class="modal-section">
             <div class="section-heading">
-              <h3>Structured synthesis</h3>
-              <span>LLM output</span>
+              <h3>Full assessment</h3>
+              <span>Agent output</span>
             </div>
-            <pre id="llm-output">The model response will appear here.</pre>
+            <pre id="llm-output">The agent response will appear here.</pre>
           </section>
         </div>
       </section>
     </div>
 
-    <script src="/static/app.js?v=report-ui-5"></script>
+    <div id="thinking-modal" class="thinking-modal" hidden>
+      <div class="thinking-backdrop"></div>
+      <section class="thinking-dialog" role="dialog" aria-modal="true" aria-labelledby="thinking-title">
+        <button class="thinking-close" type="button" data-close-thinking aria-label="Hide">x</button>
+        <div class="thinking-orbit" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="thinking-copy">
+          <p class="kicker">Live agent work</p>
+          <h2 id="thinking-title">Aegis is thinking</h2>
+          <p id="thinking-detail">Preparing the run.</p>
+        </div>
+        <div class="thinking-stats">
+          <div><span>Target</span><strong id="thinking-target">-</strong></div>
+          <div><span>Engine</span><strong id="thinking-engine">Aegis</strong></div>
+          <div><span>Elapsed</span><strong id="thinking-elapsed">0 sec</strong></div>
+          <div><span>Quota</span><strong id="thinking-quota">checking</strong></div>
+        </div>
+        <div class="thinking-progress"><span id="thinking-progress-bar"></span></div>
+        <ol id="thinking-stages" class="thinking-stages">
+          <li class="running">Scope</li>
+          <li>Recon</li>
+          <li>Evidence</li>
+          <li>Findings</li>
+          <li>Report</li>
+        </ol>
+      </section>
+    </div>
+
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="/static/app.js?v=prod-polish-1"></script>
   </body>
 </html>

@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
+import sqlite3
 import ssl
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -35,7 +39,12 @@ if load_dotenv:
     load_dotenv(os.path.join(APP_DIR, ".env"))
 
 MAX_BODY_BYTES = 1_200_000
-PUBLIC_MODEL_LABEL = "Kimi"
+PUBLIC_MODEL_LABEL = "sheepstealer"
+DATABASE_PATH = os.getenv("AEGIS_DB_PATH", os.path.join(APP_DIR, "aegis.sqlite3"))
+SESSION_TTL_DAYS = int(os.getenv("AEGIS_SESSION_TTL_DAYS", "30"))
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "").strip()
+ADMIN_PASSWORD = os.getenv("AEGIS_ADMIN_PASSWORD", "")
 ANALYSIS_MODE = os.getenv("AEGIS_ANALYSIS_MODE", "passive").strip().lower()
 HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
@@ -59,6 +68,36 @@ LLM_BASE_PROMPT = (
     "hosting solutions, and analyze it's full security layers and discover any "
     'vulnerability classifying it in critical/high/medium/low".'
 )
+DB_LOCK = threading.Lock()
+PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "free": {
+        "label": "Free",
+        "price": "$0",
+        "description": "1 Aegis request per month, enforced by account and IP.",
+        "limits": {
+            "aegis": {"limit": 1, "period": "month"},
+            "sheepstealer": {"limit": 0, "period": "day"},
+        },
+    },
+    "sheepstealer_daily": {
+        "label": "sheepstealer Daily",
+        "price": "paid",
+        "description": "2 sheepstealer requests per day.",
+        "limits": {
+            "aegis": {"limit": 0, "period": "day"},
+            "sheepstealer": {"limit": 2, "period": "day"},
+        },
+    },
+    "pro_3": {
+        "label": "Pro $3",
+        "price": "$3",
+        "description": "2 Aegis requests and 10 sheepstealer requests per day.",
+        "limits": {
+            "aegis": {"limit": 2, "period": "day"},
+            "sheepstealer": {"limit": 10, "period": "day"},
+        },
+    },
+}
 
 
 class AnalysisRequest(BaseModel):
@@ -67,6 +106,24 @@ class AnalysisRequest(BaseModel):
     engine: str = "aegis"
     validation_mode: str = "safe"
     proof_authorized: bool = False
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=160)
+    password: str = Field(..., min_length=1, max_length=512)
+
+
+class SignupRequest(LoginRequest):
+    plan: str = "free"
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str = Field(..., min_length=20)
+    plan: str = "free"
+
+
+class PlanRequest(BaseModel):
+    plan: str = Field(..., min_length=2, max_length=64)
 
 
 class PageParser(HTMLParser):
@@ -162,8 +219,346 @@ class PageParser(HTMLParser):
         return " ".join(self.title_parts).strip()
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def db_connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    password_salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        password_salt.encode("utf-8"),
+        220_000,
+    ).hex()
+    return password_salt, digest
+
+
+def verify_password(password: str, salt: str, digest: str) -> bool:
+    _, candidate = hash_password(password, salt)
+    return hmac.compare_digest(candidate, digest)
+
+
+def normalize_plan(plan: str) -> str:
+    requested = str(plan or "free").strip().lower()
+    return requested if requested in PLAN_DEFINITIONS else "free"
+
+
+def plan_payload(plan_id: str, is_admin: bool = False) -> dict[str, Any]:
+    if is_admin:
+        return {
+            "id": "admin",
+            "label": "Admin",
+            "price": "$0",
+            "description": "Unlimited tester access.",
+            "limits": {
+                "aegis": {"limit": None, "period": "unlimited"},
+                "sheepstealer": {"limit": None, "period": "unlimited"},
+            },
+        }
+    plan_id = normalize_plan(plan_id)
+    definition = PLAN_DEFINITIONS[plan_id]
+    return {"id": plan_id, **definition}
+
+
+def public_plans() -> list[dict[str, Any]]:
+    return [plan_payload(plan_id) for plan_id in PLAN_DEFINITIONS]
+
+
+def init_db() -> None:
+    os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
+    with DB_LOCK, db_connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL DEFAULT '',
+                password_hash TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                google_sub TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT 'local',
+                plan TEXT NOT NULL DEFAULT 'free',
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                subject TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                period_key TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(subject, engine, period_key)
+            );
+            """
+        )
+        ensure_admin_user(connection)
+        connection.commit()
+
+
+def ensure_admin_user(connection: sqlite3.Connection) -> None:
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+        return
+    now = utc_now()
+    salt, digest = hash_password(ADMIN_PASSWORD)
+    existing = connection.execute(
+        "SELECT id FROM users WHERE lower(username) = lower(?)",
+        (ADMIN_USERNAME,),
+    ).fetchone()
+    if existing:
+        connection.execute(
+            """
+            UPDATE users
+            SET password_salt = ?, password_hash = ?, plan = 'pro_3',
+                is_admin = 1, provider = 'local', updated_at = ?
+            WHERE id = ?
+            """,
+            (salt, digest, now, existing["id"]),
+        )
+        return
+    connection.execute(
+        """
+        INSERT INTO users (
+            username, password_salt, password_hash, provider, plan,
+            is_admin, created_at, updated_at
+        )
+        VALUES (?, ?, ?, 'local', 'pro_3', 1, ?, ?)
+        """,
+        (ADMIN_USERNAME, salt, digest, now, now),
+    )
+
+
+def serialize_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    is_admin = bool(row["is_admin"])
+    plan_id = str(row["plan"] or "free")
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+        "provider": row["provider"],
+        "is_admin": is_admin,
+        "plan": plan_payload(plan_id, is_admin),
+    }
+
+
+def create_session(user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=SESSION_TTL_DAYS)
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO sessions (token, user_id, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, user_id, now.isoformat(), expires_at.isoformat()),
+        )
+        connection.commit()
+    return token
+
+
+def bearer_token(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return request.headers.get("x-aegis-session", "").strip()
+
+
+def authenticate_request(request: Request) -> dict[str, Any] | None:
+    token = bearer_token(request)
+    if not token:
+        return None
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT users.*
+            FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token = ? AND sessions.expires_at > ?
+            """,
+            (token, utc_now()),
+        ).fetchone()
+    if not row:
+        return None
+    user = serialize_user(row)
+    user["token"] = token
+    return user
+
+
+def require_user(request: Request) -> dict[str, Any]:
+    user = authenticate_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    return user
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else "unknown"
+
+
+def create_local_user(username: str, password: str, plan: str) -> tuple[str, dict[str, Any]]:
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    salt, digest = hash_password(password)
+    now = utc_now()
+    plan_id = normalize_plan(plan)
+    with DB_LOCK, db_connect() as connection:
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (
+                    username, password_salt, password_hash, provider, plan,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'local', ?, ?, ?)
+                """,
+                (clean_username, salt, digest, plan_id, now, now),
+            )
+            user_id = int(cursor.lastrowid)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="Username already exists.") from exc
+    token = create_session(user_id)
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return token, serialize_user(row)
+
+
+def login_local_user(username: str, password: str) -> tuple[str, dict[str, Any]]:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            (username.strip(),),
+        ).fetchone()
+    if not row or row["provider"] != "local":
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    if not verify_password(password, row["password_salt"], row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    token = create_session(int(row["id"]))
+    return token, serialize_user(row)
+
+
+def period_key(period: str) -> str:
+    now = datetime.now(timezone.utc)
+    if period == "month":
+        return now.strftime("%Y-%m")
+    return now.strftime("%Y-%m-%d")
+
+
+def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> dict[str, Any]:
+    if not user:
+        return {"allowed": False, "message": "Sign in required before running an analysis."}
+    if user.get("is_admin"):
+        return {
+            "allowed": True,
+            "engine": engine,
+            "plan": "admin",
+            "limit": None,
+            "remaining": None,
+            "message": "Admin quota bypass active.",
+        }
+
+    plan_id = normalize_plan(user["plan"]["id"])
+    limit_config = PLAN_DEFINITIONS[plan_id]["limits"].get(engine, {"limit": 0, "period": "day"})
+    limit = int(limit_config.get("limit") or 0)
+    period = str(limit_config.get("period") or "day")
+    if limit <= 0:
+        return {
+            "allowed": False,
+            "engine": engine,
+            "plan": plan_id,
+            "limit": 0,
+            "remaining": 0,
+            "message": f"Your {PLAN_DEFINITIONS[plan_id]['label']} plan does not include {engine} runs.",
+        }
+
+    key = period_key(period)
+    subjects = [f"user:{user['id']}"]
+    if plan_id == "free":
+        subjects.append(f"ip:{ip_address}")
+
+    with DB_LOCK, db_connect() as connection:
+        counts = []
+        for subject in subjects:
+            row = connection.execute(
+                """
+                SELECT count FROM usage_counters
+                WHERE subject = ? AND engine = ? AND period_key = ?
+                """,
+                (subject, engine, key),
+            ).fetchone()
+            counts.append(int(row["count"]) if row else 0)
+        highest_count = max(counts or [0])
+        if highest_count >= limit:
+            return {
+                "allowed": False,
+                "engine": engine,
+                "plan": plan_id,
+                "limit": limit,
+                "remaining": 0,
+                "period": period,
+                "message": f"{PLAN_DEFINITIONS[plan_id]['label']} quota reached for {engine}.",
+            }
+        now = utc_now()
+        for subject in subjects:
+            connection.execute(
+                """
+                INSERT INTO usage_counters (subject, engine, period_key, count, created_at, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(subject, engine, period_key)
+                DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
+                """,
+                (subject, engine, key, now, now),
+            )
+        connection.commit()
+
+    return {
+        "allowed": True,
+        "engine": engine,
+        "plan": plan_id,
+        "limit": limit,
+        "remaining": max(0, limit - highest_count - 1),
+        "period": period,
+        "message": f"{max(0, limit - highest_count - 1)} {engine} run(s) left this {period}.",
+    }
+
+
+def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
+    plan_id = normalize_plan(plan)
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            "UPDATE users SET plan = ?, updated_at = ? WHERE id = ? AND is_admin = 0",
+            (plan_id, utc_now(), user_id),
+        )
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        connection.commit()
+    return serialize_user(row)
+
+
 app = FastAPI(title="Aegis Autonomous Hosting & Security Analyst")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+init_db()
 
 
 @app.get("/")
@@ -176,16 +571,126 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/config")
+def api_config() -> dict[str, Any]:
+    return {
+        "google_client_id": GOOGLE_CLIENT_ID,
+        "plans": public_plans(),
+        "engines": [
+            {"id": "aegis", "label": "Aegis"},
+            {"id": "sheepstealer", "label": "sheepstealer"},
+        ],
+    }
+
+
+@app.get("/api/session")
+def api_session(request: Request) -> dict[str, Any]:
+    user = authenticate_request(request)
+    if user:
+        user = {key: value for key, value in user.items() if key != "token"}
+    return {"authenticated": bool(user), "user": user}
+
+
+@app.post("/api/auth/signup")
+def api_signup(payload: SignupRequest) -> dict[str, Any]:
+    token, user = create_local_user(payload.username, payload.password, payload.plan)
+    return {"token": token, "user": user}
+
+
+@app.post("/api/auth/login")
+def api_login(payload: LoginRequest) -> dict[str, Any]:
+    token, user = login_local_user(payload.username, payload.password)
+    return {"token": token, "user": user}
+
+
+@app.post("/api/auth/logout")
+def api_logout(request: Request) -> dict[str, bool]:
+    token = bearer_token(request)
+    if token:
+        with DB_LOCK, db_connect() as connection:
+            connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            connection.commit()
+    return {"ok": True}
+
+
+@app.post("/api/auth/google")
+async def api_google(payload: GoogleAuthRequest) -> dict[str, Any]:
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        response = await client.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": payload.credential},
+        )
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Google credential rejected.")
+    claims = response.json()
+    if claims.get("aud") != GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Google credential audience mismatch.")
+    if str(claims.get("email_verified", "")).lower() not in {"true", "1"}:
+        raise HTTPException(status_code=401, detail="Google email is not verified.")
+
+    email = str(claims.get("email") or "").strip().lower()
+    subject = str(claims.get("sub") or "").strip()
+    if not email or not subject:
+        raise HTTPException(status_code=401, detail="Google credential is missing identity fields.")
+
+    now = utc_now()
+    plan_id = normalize_plan(payload.plan)
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE google_sub = ? OR lower(email) = lower(?)",
+            (subject, email),
+        ).fetchone()
+        if row:
+            connection.execute(
+                """
+                UPDATE users
+                SET google_sub = ?, email = ?, provider = 'google', updated_at = ?
+                WHERE id = ?
+                """,
+                (subject, email, now, row["id"]),
+            )
+            user_id = int(row["id"])
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (
+                    username, email, google_sub, provider, plan, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'google', ?, ?, ?)
+                """,
+                (email, email, subject, plan_id, now, now),
+            )
+            user_id = int(cursor.lastrowid)
+        connection.commit()
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    token = create_session(user_id)
+    return {"token": token, "user": serialize_user(row)}
+
+
+@app.post("/api/account/plan")
+def api_update_plan(request: Request, payload: PlanRequest) -> dict[str, Any]:
+    user = require_user(request)
+    if user["is_admin"]:
+        return {"user": user}
+    return {"user": update_user_plan(int(user["id"]), payload.plan)}
+
+
 @app.post("/api/analyze")
-async def analyze(payload: AnalysisRequest) -> StreamingResponse:
+async def analyze(request: Request, payload: AnalysisRequest) -> StreamingResponse:
     return StreamingResponse(
-        run_analysis(payload),
+        run_analysis(payload, authenticate_request(request), client_ip(request)),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache"},
     )
 
 
-async def run_analysis(payload: AnalysisRequest):
+async def run_analysis(
+    payload: AnalysisRequest,
+    auth_context: dict[str, Any] | None,
+    ip_address: str,
+):
     started_at = time.perf_counter()
     steps: list[dict[str, Any]] = []
 
@@ -210,6 +715,10 @@ async def run_analysis(payload: AnalysisRequest):
         return step
 
     try:
+        if not auth_context:
+            yield event("error", {"message": "Sign in or create an account before running Aegis."})
+            return
+
         if not payload.authorized:
             yield event(
                 "error",
@@ -238,6 +747,11 @@ async def run_analysis(payload: AnalysisRequest):
                 {"message": "Proof mode requires separate reversible-proof authorization."},
             )
             return
+        quota = reserve_usage(auth_context, ip_address, selected_engine)
+        yield event("quota", quota)
+        if not quota.get("allowed"):
+            yield event("error", {"message": quota.get("message", "Quota exceeded.")})
+            return
         step.update(
             {
                 "status": "complete",
@@ -247,19 +761,24 @@ async def run_analysis(payload: AnalysisRequest):
                     "engine": selected_engine,
                     "validation_mode": validation_mode,
                     "proof_authorized": payload.proof_authorized,
+                    "quota": quota,
                 },
             }
         )
         yield event("step", step)
 
-        if selected_engine in {"aegis", "kimi"}:
-            is_kimi = selected_engine == "kimi"
-            step_id = "kimi_direct" if is_kimi else "aegis_direct"
-            engine_title = "Kimi direct assessment" if is_kimi else "Aegis direct assessment"
-            engine_tool = "kimi_k2" if is_kimi else "aegis_engine"
+        if selected_engine in {"aegis", "sheepstealer"}:
+            is_sheepstealer = selected_engine == "sheepstealer"
+            step_id = "sheepstealer_direct" if is_sheepstealer else "aegis_direct"
+            engine_title = (
+                "sheepstealer direct assessment"
+                if is_sheepstealer
+                else "Aegis direct assessment"
+            )
+            engine_tool = "sheepstealer_hf" if is_sheepstealer else "aegis_engine"
             engine_detail = (
-                "Passing the authorized target directly to Kimi for end-to-end analysis."
-                if is_kimi
+                "Passing the authorized target directly to sheepstealer for end-to-end analysis."
+                if is_sheepstealer
                 else "Passing the authorized target directly to Aegis for end-to-end analysis."
             )
             step = record_step(
@@ -273,7 +792,9 @@ async def run_analysis(payload: AnalysisRequest):
             direct_started_at = time.perf_counter()
             llm_task = asyncio.create_task(
                 asyncio.to_thread(
-                    call_kimi_direct_pentest if is_kimi else call_aegis_direct_pentest,
+                    call_sheepstealer_direct_pentest
+                    if is_sheepstealer
+                    else call_aegis_direct_pentest,
                     target_url,
                     validation_mode,
                     payload.proof_authorized,
@@ -290,7 +811,7 @@ async def run_analysis(payload: AnalysisRequest):
                     {
                         "detail": (
                             f"{engine_title} is still running. "
-                            f"Elapsed: {elapsed_label}. Waiting for model output."
+                            f"Elapsed: {elapsed_label}. Waiting for agent output."
                         ),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
@@ -304,7 +825,7 @@ async def run_analysis(payload: AnalysisRequest):
                     "result": {
                         "model": llm_context.get(
                             "model",
-                            PUBLIC_MODEL_LABEL if is_kimi else "Aegis local engine",
+                            PUBLIC_MODEL_LABEL if is_sheepstealer else "Aegis local engine",
                         ),
                         "skipped": llm_context.get("skipped", False),
                         "preview": llm_preview(llm_context.get("content", "")),
@@ -323,8 +844,12 @@ async def run_analysis(payload: AnalysisRequest):
                 analysis_mode=step_id,
                 validation_mode=validation_mode,
                 proof_authorized=payload.proof_authorized,
-                technology=f"{'Kimi' if is_kimi else 'Aegis'} direct analysis",
-                reason_phrase="Kimi K2" if is_kimi else "Aegis Engine",
+                technology=(
+                    "sheepstealer direct analysis"
+                    if is_sheepstealer
+                    else "Aegis direct analysis"
+                ),
+                reason_phrase="sheepstealer" if is_sheepstealer else "Aegis Engine",
             )
             yield event("metrics", direct_report["summary"])
             yield event("report", direct_report)
@@ -465,7 +990,7 @@ async def run_analysis(payload: AnalysisRequest):
 
         step = record_step(
             "llm",
-            "Kimi synthesis",
+            "Agent synthesis",
             "reasoning_synthesizer",
             "running",
             "Building the evidence matrix, risk ranking, and remediation plan.",
@@ -513,8 +1038,8 @@ def human_duration(duration_ms: int) -> str:
 
 def normalize_analysis_engine(raw_engine: str) -> str:
     engine = str(raw_engine or "aegis").strip().lower()
-    if engine in {"kimi", "hf", "huggingface", "hugging_face"}:
-        return "kimi"
+    if engine in {"sheepstealer", "kimi", "hf", "huggingface", "hugging_face"}:
+        return "sheepstealer"
     return "aegis"
 
 
@@ -1962,7 +2487,7 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
         "attempts": len(errors),
         "error": "all_hf_credentials_failed",
         "content": (
-            "Structured synthesis failed after trying the configured credential(s). "
+            "Agent synthesis failed after trying the configured credential(s). "
             "The deterministic passive analysis report is still available. "
             f"Last error: {last_error}"
         ),
@@ -2064,7 +2589,7 @@ def call_aegis_direct_pentest(
     return result
 
 
-def call_kimi_direct_pentest(
+def call_sheepstealer_direct_pentest(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
@@ -2075,16 +2600,16 @@ def call_kimi_direct_pentest(
             "skipped": True,
             "model": PUBLIC_MODEL_LABEL,
             "credential_count": 0,
-            "analysis_mode": "kimi_direct",
+            "analysis_mode": "sheepstealer_direct",
             "validation_mode": validation_mode,
             "proof_authorized": proof_authorized,
             "content": (
-                "HF_TOKENS or HF_TOKEN is not configured. Kimi direct analysis cannot run "
+                "HF_TOKENS or HF_TOKEN is not configured. sheepstealer direct analysis cannot run "
                 "until a Hugging Face token is configured and the server is restarted."
             ),
         }
 
-    prompt = build_kimi_direct_pentest_prompt(
+    prompt = build_sheepstealer_direct_pentest_prompt(
         target_url,
         validation_mode,
         proof_authorized,
@@ -2102,7 +2627,7 @@ def call_kimi_direct_pentest(
                 "credential_count": len(token_choices),
                 "credential_index": token_index + 1,
                 "attempts": len(errors) + 1,
-                "analysis_mode": "kimi_direct",
+                "analysis_mode": "sheepstealer_direct",
                 "validation_mode": validation_mode,
                 "proof_authorized": proof_authorized,
             }
@@ -2116,10 +2641,10 @@ def call_kimi_direct_pentest(
         "credential_count": len(token_choices),
         "attempts": len(errors),
         "error": "all_hf_credentials_failed",
-        "analysis_mode": "kimi_direct",
+        "analysis_mode": "sheepstealer_direct",
         "validation_mode": validation_mode,
         "proof_authorized": proof_authorized,
-        "content": f"Kimi direct analysis failed after all configured credential(s). Last error: {last_error}",
+        "content": f"sheepstealer direct analysis failed after all configured credential(s). Last error: {last_error}",
     }
 
 
@@ -2194,14 +2719,14 @@ def build_aegis_direct_pentest_prompt(
     )
 
 
-def build_kimi_direct_pentest_prompt(
+def build_sheepstealer_direct_pentest_prompt(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
 ) -> str:
     return build_direct_pentest_prompt(
         target_url,
-        "You are Kimi K2 running as the selected Aegis analysis engine.",
+        "You are sheepstealer running as the selected Aegis analysis engine.",
         "Do not use or assume any precomputed passive collector output; the backend only passed you the target.",
         validation_mode,
         proof_authorized,
@@ -2431,7 +2956,7 @@ def build_llm_step_detail(llm_context: dict[str, Any]) -> str:
     credential_count = int(llm_context.get("credential_count") or 0)
     if llm_context.get("error"):
         return (
-            f"Structured synthesis failed after {credential_count} configured credential(s); "
+            f"Agent synthesis failed after {credential_count} configured credential(s); "
             "the deterministic report remains available."
         )
     if llm_context.get("skipped"):

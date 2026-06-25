@@ -7,6 +7,22 @@ const proofAuthorizedInput = document.querySelector("#proof-authorized");
 const proofConsentRow = document.querySelector("#proof-consent-row");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
+const authPanel = document.querySelector("#auth-panel");
+const authModal = document.querySelector("#auth-modal");
+const accountModal = document.querySelector("#account-modal");
+const accountPanel = document.querySelector("#account-panel");
+const authTabs = document.querySelectorAll("[data-auth-tab]");
+const loginForm = document.querySelector("#login-form");
+const signupForm = document.querySelector("#signup-form");
+const signupPlanInput = document.querySelector("#signup-plan");
+const accountPlanInput = document.querySelector("#account-plan");
+const accountName = document.querySelector("#account-name");
+const accountPlanLabel = document.querySelector("#account-plan-label");
+const authMessage = document.querySelector("#auth-message");
+const logoutButton = document.querySelector("#logout-button");
+const sessionButton = document.querySelector("#session-button");
+const googleSignin = document.querySelector("#google-signin");
+const googleFallback = document.querySelector("#google-fallback");
 const traceList = document.querySelector("#trace-list");
 const workBoard = document.querySelector("#work-board");
 const workStatus = document.querySelector("#work-status");
@@ -33,23 +49,42 @@ const reportModal = document.querySelector("#report-modal");
 const openReportButton = document.querySelector("#open-report");
 const navActions = document.querySelectorAll("[data-nav-target]");
 const closeReportTriggers = document.querySelectorAll("[data-close-report]");
+const closeAuthTriggers = document.querySelectorAll("[data-close-auth]");
+const closeAccountTriggers = document.querySelectorAll("[data-close-account]");
 const reportSearchInput = document.querySelector(".report-search input");
+const thinkingModal = document.querySelector("#thinking-modal");
+const closeThinkingTriggers = document.querySelectorAll("[data-close-thinking]");
+const thinkingTitle = document.querySelector("#thinking-title");
+const thinkingDetail = document.querySelector("#thinking-detail");
+const thinkingTarget = document.querySelector("#thinking-target");
+const thinkingEngine = document.querySelector("#thinking-engine");
+const thinkingElapsed = document.querySelector("#thinking-elapsed");
+const thinkingQuota = document.querySelector("#thinking-quota");
+const thinkingProgressBar = document.querySelector("#thinking-progress-bar");
+const thinkingStages = document.querySelector("#thinking-stages");
 
 const traceItems = new Map();
+const SESSION_KEY = "aegisSessionToken";
 let runStartedAt = 0;
 let timer = null;
 let currentReport = null;
+let currentUser = null;
+let appConfig = { plans: [], google_client_id: "" };
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
 } else {
   initializeApp();
 }
+window.addEventListener("load", initializeGoogleSignIn);
 
-function initializeApp() {
+async function initializeApp() {
   targetInput?.focus();
   setReportNavReady(false);
   updateProofConsentVisibility();
+  await loadConfig();
+  await restoreSession();
+  initializeGoogleSignIn();
   installLocalPreviewHook();
 }
 
@@ -59,6 +94,75 @@ form?.addEventListener("submit", async (event) => {
 });
 
 validationModeInput?.addEventListener("change", updateProofConsentVisibility);
+
+sessionButton?.addEventListener("click", () => {
+  if (currentUser) {
+    openAccountModal();
+  } else {
+    openAuthModal("login");
+  }
+});
+
+authTabs.forEach((tab) => {
+  tab.addEventListener("click", () => switchAuthTab(tab.dataset.authTab || "login"));
+});
+
+loginForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(loginForm);
+  await authenticate("/api/auth/login", {
+    username: formData.get("username"),
+    password: formData.get("password"),
+  });
+});
+
+signupForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(signupForm);
+  await authenticate("/api/auth/signup", {
+    username: formData.get("username"),
+    password: formData.get("password"),
+    plan: formData.get("plan") || "free",
+  });
+});
+
+accountPlanInput?.addEventListener("change", async () => {
+  if (!currentUser || currentUser.is_admin) return;
+  try {
+    const data = await apiJson("/api/account/plan", {
+      method: "POST",
+      body: JSON.stringify({ plan: accountPlanInput.value }),
+    });
+    currentUser = data.user;
+    renderSession();
+  } catch (error) {
+    showAuthMessage(error.message, true);
+  }
+});
+
+logoutButton?.addEventListener("click", async () => {
+  try {
+    await apiJson("/api/auth/logout", { method: "POST" });
+  } catch {
+    // Local logout should still clear the browser session if the server is unavailable.
+  }
+  window.localStorage.removeItem(SESSION_KEY);
+  currentUser = null;
+  renderSession();
+});
+
+googleFallback?.addEventListener("click", () => {
+  if (!appConfig.google_client_id) {
+    showAuthMessage("Google sign-in is not configured. Add GOOGLE_CLIENT_ID in .env and restart Aegis.", true);
+    return;
+  }
+  if (window.google?.accounts?.id) {
+    window.google.accounts.id.prompt();
+    showAuthMessage("Choose your Google account in the popup.", false);
+    return;
+  }
+  showAuthMessage("Google sign-in is still loading. Try again in a moment.", false);
+});
 
 openReportButton?.addEventListener("click", () => {
   if (currentReport) {
@@ -81,8 +185,23 @@ closeReportTriggers.forEach((trigger) => {
   trigger.addEventListener("click", closeReportModal);
 });
 
+closeAuthTriggers.forEach((trigger) => {
+  trigger.addEventListener("click", closeAuthModal);
+});
+
+closeAccountTriggers.forEach((trigger) => {
+  trigger.addEventListener("click", closeAccountModal);
+});
+
+closeThinkingTriggers.forEach((trigger) => {
+  trigger.addEventListener("click", hideThinkingModal);
+});
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeReportModal();
+  if (event.key !== "Escape") return;
+  closeReportModal();
+  closeAuthModal();
+  closeAccountModal();
 });
 
 traceList?.addEventListener("click", (event) => {
@@ -101,7 +220,201 @@ reportSearchInput?.addEventListener("input", () => {
   filterReport(reportSearchInput.value);
 });
 
+async function loadConfig() {
+  try {
+    appConfig = await apiJson("/api/config", { auth: false });
+    renderPlanOptions();
+  } catch (error) {
+    showAuthMessage(`Config unavailable: ${error.message}`, true);
+  }
+}
+
+async function restoreSession() {
+  const token = window.localStorage.getItem(SESSION_KEY);
+  if (!token) {
+    renderSession();
+    return;
+  }
+  try {
+    const data = await apiJson("/api/session");
+    currentUser = data.authenticated ? data.user : null;
+    if (!currentUser) window.localStorage.removeItem(SESSION_KEY);
+  } catch {
+    window.localStorage.removeItem(SESSION_KEY);
+    currentUser = null;
+  }
+  renderSession();
+}
+
+async function authenticate(endpoint, payload) {
+  try {
+    const data = await apiJson(endpoint, {
+      method: "POST",
+      auth: false,
+      body: JSON.stringify(payload),
+    });
+    window.localStorage.setItem(SESSION_KEY, data.token);
+    currentUser = data.user;
+    renderSession();
+    closeAuthModal();
+    showAuthMessage("Signed in.", false);
+  } catch (error) {
+    showAuthMessage(error.message, true);
+  }
+}
+
+async function apiJson(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (options.auth !== false) {
+    const token = window.localStorage.getItem(SESSION_KEY);
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(path, { ...options, headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+function switchAuthTab(tabName) {
+  const isSignup = tabName === "signup";
+  authTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.authTab === tabName);
+  });
+  if (loginForm) loginForm.hidden = isSignup;
+  if (signupForm) signupForm.hidden = !isSignup;
+}
+
+function renderPlanOptions() {
+  const plans = appConfig.plans || [];
+  const optionHtml = plans
+    .map((plan) => {
+      const limits = plan.limits || {};
+      const aegis = formatLimit(limits.aegis);
+      const sheepstealer = formatLimit(limits.sheepstealer);
+      return `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.label)} - Aegis ${escapeHtml(aegis)}, sheepstealer ${escapeHtml(sheepstealer)}</option>`;
+    })
+    .join("");
+  if (signupPlanInput) signupPlanInput.innerHTML = optionHtml;
+  if (accountPlanInput) accountPlanInput.innerHTML = optionHtml;
+}
+
+function formatLimit(limit) {
+  if (!limit) return "0";
+  if (limit.limit === null || limit.period === "unlimited") return "unlimited";
+  return `${limit.limit}/${limit.period}`;
+}
+
+function renderSession() {
+  const signedIn = Boolean(currentUser);
+  if (sessionButton) {
+    sessionButton.textContent = signedIn
+      ? `${currentUser.username}${currentUser.is_admin ? " / admin" : ""}`
+      : "Sign in";
+    sessionButton.classList.toggle("is-authenticated", signedIn);
+  }
+  if (!signedIn) {
+    closeAccountModal();
+    showAuthMessage("Use your workspace account to continue.", false);
+    return;
+  }
+  const plan = currentUser.plan || {};
+  if (accountName) accountName.textContent = currentUser.username;
+  if (accountPlanLabel) accountPlanLabel.textContent = currentUser.is_admin ? "Unlimited" : plan.label;
+  if (accountPlanInput) {
+    accountPlanInput.value = plan.id === "admin" ? "pro_3" : plan.id;
+    accountPlanInput.disabled = Boolean(currentUser.is_admin);
+  }
+}
+
+function openAuthModal(tab = "login") {
+  switchAuthTab(tab);
+  closeAccountModal();
+  if (!authModal) return;
+  authModal.hidden = false;
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => {
+    const selector =
+      tab === "signup"
+        ? '#signup-form input[name="username"]'
+        : '#login-form input[name="username"]';
+    authModal.querySelector(selector)?.focus();
+  }, 40);
+}
+
+function closeAuthModal() {
+  if (!authModal) return;
+  authModal.hidden = true;
+  if (reportModal?.hidden !== false && accountModal?.hidden !== false) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+function openAccountModal() {
+  closeAuthModal();
+  if (!accountModal) return;
+  accountModal.hidden = false;
+  document.body.classList.add("modal-open");
+  accountPlanInput?.focus();
+}
+
+function closeAccountModal() {
+  if (!accountModal) return;
+  accountModal.hidden = true;
+  if (reportModal?.hidden !== false && authModal?.hidden !== false) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+function showAuthMessage(message, isError = false) {
+  if (!authMessage) return;
+  authMessage.textContent = message;
+  authMessage.classList.toggle("error", isError);
+}
+
+function initializeGoogleSignIn() {
+  if (!appConfig.google_client_id) {
+    googleFallback?.classList.add("needs-config");
+    googleFallback?.removeAttribute("disabled");
+    if (googleSignin) googleSignin.hidden = true;
+    return;
+  }
+  if (!googleSignin || !window.google?.accounts?.id) {
+    googleFallback?.classList.add("is-loading");
+    googleFallback?.removeAttribute("disabled");
+    return;
+  }
+  window.google.accounts.id.initialize({
+    client_id: appConfig.google_client_id,
+    callback: async (response) => {
+      const plan = signupPlanInput?.value || "free";
+      await authenticate("/api/auth/google", {
+        credential: response.credential,
+        plan,
+      });
+    },
+  });
+  window.google.accounts.id.renderButton(googleSignin, {
+    type: "standard",
+    theme: "outline",
+    size: "large",
+    text: "continue_with",
+    shape: "pill",
+  });
+  if (googleFallback) googleFallback.hidden = true;
+  if (googleSignin) googleSignin.hidden = false;
+}
+
 async function runAnalysis() {
+  if (!currentUser) {
+    showError("Sign in or create an account before running Aegis.");
+    openAuthModal("login");
+    return;
+  }
   const target = normalizeTargetInput(targetInput.value);
   const validationMode = validationModeInput?.value || "safe";
   const proofAuthorized = Boolean(proofAuthorizedInput?.checked);
@@ -122,11 +435,16 @@ async function runAnalysis() {
   agentDetail.textContent = "Preparing Aegis tools.";
   workStatus.textContent = "Running";
   workDetail.textContent = "Preparing Aegis tools.";
+  showThinkingModal(target, analysisEngineInput?.value || "aegis");
 
   try {
+    const token = window.localStorage.getItem(SESSION_KEY);
     const response = await fetch("/api/analyze", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         target,
         authorized: authorizedInput.checked,
@@ -180,7 +498,11 @@ function handleEvent(message) {
     agentState.textContent = data.status === "complete" ? "Thinking" : "Running";
     agentDetail.textContent = data.detail;
     updateProgress();
+    updateThinkingFromStep(data);
     renderWorkStep(data);
+  }
+  if (type === "quota") {
+    renderQuota(data);
   }
   if (type === "metrics") {
     renderMetrics(data);
@@ -194,12 +516,14 @@ function handleEvent(message) {
     workStatus.textContent = "Complete";
     workDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workProgressLabel.textContent = "100%";
+    hideThinkingModal();
   }
   if (type === "error") {
     showError(data.message);
   }
   if (type === "done") {
     elapsed.textContent = formatDuration(data.duration_ms);
+    if (thinkingElapsed) thinkingElapsed.textContent = formatDuration(data.duration_ms);
   }
 }
 
@@ -229,7 +553,7 @@ function resetRun(target) {
   findingsList.innerHTML = '<p class="panel-placeholder">No findings yet.</p>';
   hostingList.innerHTML =
     '<p class="panel-placeholder">Recommendations will be generated after analysis.</p>';
-  llmOutput.textContent = "Waiting for model output.";
+  llmOutput.textContent = "Waiting for agent output.";
   renderMetrics({
     score: 0,
     posture: "Running",
@@ -299,6 +623,58 @@ function renderWorkStep(step) {
   workDetail.textContent = step.detail;
 }
 
+function showThinkingModal(target, engine) {
+  if (!thinkingModal) return;
+  thinkingModal.hidden = false;
+  thinkingTarget.textContent = target || "-";
+  thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aegis";
+  thinkingQuota.textContent = "checking";
+  thinkingTitle.textContent = "Aegis is thinking";
+  thinkingDetail.textContent = "Preparing the run.";
+  thinkingProgressBar?.style.setProperty("--thinking-progress", "8%");
+  setThinkingStage(0);
+}
+
+function hideThinkingModal() {
+  if (!thinkingModal) return;
+  thinkingModal.hidden = true;
+}
+
+function updateThinkingFromStep(step) {
+  if (!thinkingModal || thinkingModal.hidden) return;
+  thinkingTitle.textContent = step.status === "complete" ? "Evidence captured" : step.title;
+  thinkingDetail.textContent = step.detail || "Working.";
+  const stageIndex = stageIndexForStep(step.id);
+  setThinkingStage(stageIndex);
+  const progress = Number(String(workProgressLabel.textContent || "0").replace("%", "")) || 0;
+  thinkingProgressBar?.style.setProperty("--thinking-progress", `${Math.max(8, progress)}%`);
+}
+
+function renderQuota(quota) {
+  if (!quota) return;
+  const label = quota.limit === null ? "unlimited" : `${quota.remaining ?? 0}/${quota.limit ?? 0} left`;
+  if (thinkingQuota) thinkingQuota.textContent = quota.allowed ? label : "blocked";
+  if (!quota.allowed) return;
+  agentDetail.textContent = quota.message || agentDetail.textContent;
+}
+
+function setThinkingStage(activeIndex) {
+  if (!thinkingStages) return;
+  Array.from(thinkingStages.children).forEach((item, index) => {
+    item.classList.toggle("complete", index < activeIndex);
+    item.classList.toggle("running", index === activeIndex);
+  });
+}
+
+function stageIndexForStep(stepId) {
+  if (["scope"].includes(stepId)) return 0;
+  if (["dns", "http", "tls", "surface", "aegis_direct", "sheepstealer_direct"].includes(stepId)) {
+    return 1;
+  }
+  if (["local_report", "llm"].includes(stepId)) return 3;
+  return 2;
+}
+
 function renderMetrics(summary) {
   const score = Number(summary.score || 0);
   scoreRing.style.setProperty("--score", score);
@@ -326,7 +702,7 @@ function renderReport(report) {
     renderFindings(report.vulnerabilities || []);
     renderHosting(report.hosting_recommendations || []);
   }
-  llmOutput.textContent = report.llm?.content || "No LLM content returned.";
+  llmOutput.textContent = report.llm?.content || "No agent content returned.";
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
 }
@@ -387,20 +763,20 @@ function setReportModeLabels(report) {
   const sections = reportModal?.querySelectorAll(".modal-section") || [];
   const kicker = reportModal?.querySelector(".modal-header .kicker");
   const isDirect = Boolean(report);
-  const engineName = isDirect ? directEngineName(report) : "Kimi";
-  if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Kimi report";
+  const engineName = isDirect ? directEngineName(report) : "Agent";
+  if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Aegis report";
   const labels = isDirect
     ? [
         ["Report overview", `Parsed from raw ${engineName} output`],
         ["Findings by severity", "Critical to low"],
         ["Evidence and remediation", "Plan, logs, validation"],
-        ["Raw LLM output", "Unmodified source"],
+        ["Raw agent output", "Unmodified source"],
       ]
     : [
         ["Facts", "Passive evidence"],
         ["Security findings", "Classified issues"],
         ["Recommended architecture", "Hosting and edge hardening"],
-        ["Structured synthesis", "LLM output"],
+        ["Full assessment", "Agent output"],
       ];
   labels.forEach(([title, subtitle], index) => {
     const section = sections[index];
@@ -413,13 +789,15 @@ function setReportModeLabels(report) {
 }
 
 function isDirectReport(report) {
-  return ["aegis_direct", "kimi_direct", "direct"].includes(
+  return ["aegis_direct", "sheepstealer_direct", "kimi_direct", "direct"].includes(
     report?.surface?.analysis_mode,
   );
 }
 
 function directEngineName(report) {
-  return report?.surface?.analysis_mode === "kimi_direct" ? "Kimi" : "Aegis";
+  return ["sheepstealer_direct", "kimi_direct"].includes(report?.surface?.analysis_mode)
+    ? "sheepstealer"
+    : "Aegis";
 }
 
 function validationModeLabel(mode) {
@@ -732,7 +1110,7 @@ function renderEmptyReport() {
   `;
   findingsList.innerHTML = '<p class="panel-placeholder">Findings will appear after the first scan.</p>';
   hostingList.innerHTML = '<p class="panel-placeholder">Architecture recommendations will appear after analysis.</p>';
-  llmOutput.textContent = "The model output will appear after the first completed scan.";
+  llmOutput.textContent = "The agent output will appear after the first completed scan.";
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
 }
@@ -835,6 +1213,7 @@ function renderHosting(recommendations) {
 }
 
 function showError(message) {
+  hideThinkingModal();
   agentState.textContent = "Needs attention";
   agentDetail.textContent = message;
   workStatus.textContent = "Needs attention";
@@ -885,7 +1264,9 @@ function openReportModal() {
 function closeReportModal() {
   if (!reportModal) return;
   reportModal.hidden = true;
-  document.body.classList.remove("modal-open");
+  if (authModal?.hidden !== false && accountModal?.hidden !== false) {
+    document.body.classList.remove("modal-open");
+  }
 }
 
 function setReportNavReady(isReady) {
@@ -924,7 +1305,9 @@ function filterReport(query) {
 
 function updateElapsed() {
   if (!runStartedAt) return;
-  elapsed.textContent = formatDuration(Math.max(0, Math.round(performance.now() - runStartedAt)));
+  const duration = formatDuration(Math.max(0, Math.round(performance.now() - runStartedAt)));
+  elapsed.textContent = duration;
+  if (thinkingElapsed) thinkingElapsed.textContent = duration;
 }
 
 function scrollChatToBottom() {

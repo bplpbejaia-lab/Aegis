@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 .aegis-local-llm/
 .aegis-codex-cli/
+aegis.sqlite3
+aegis.sqlite3-*
+aegis-uvicorn-*.log
