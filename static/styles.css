@@ -90,7 +90,7 @@ button:disabled {
   grid-template-columns: 278px minmax(0, 1fr);
   gap: 8px;
   min-height: 100vh;
-  padding: 8px 8px 104px;
+  padding: 8px;
   background:
     radial-gradient(circle at 72% -18%, rgba(30, 215, 96, 0.18), transparent 34%),
     radial-gradient(circle at 18% 12%, rgba(29, 185, 84, 0.1), transparent 28%),
@@ -101,7 +101,7 @@ button:disabled {
   position: sticky;
   top: 8px;
   z-index: 10;
-  height: calc(100vh - 112px);
+  height: calc(100vh - 16px);
   min-height: 620px;
 }
 
