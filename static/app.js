@@ -95,6 +95,8 @@ let currentRunId = "";
 let currentRunController = null;
 let isStoppingRun = false;
 let currentQuotaSummary = null;
+let googleButtonRendered = false;
+let googleInitTimer = null;
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -224,6 +226,10 @@ logoutButton?.addEventListener("click", async () => {
 googleFallback?.addEventListener("click", () => {
   if (!appConfig.google_client_id) {
     showAuthMessage("Google sign-in is not configured. Add GOOGLE_CLIENT_ID in .env and restart Aelyx.", true);
+    return;
+  }
+  if (window.google?.accounts?.id && googleSignin && !googleButtonRendered) {
+    initializeGoogleSignIn();
     return;
   }
   if (window.google?.accounts?.id) {
@@ -889,15 +895,24 @@ function showAuthMessage(message, isError = false) {
 }
 
 function initializeGoogleSignIn() {
-  if (googleSignin) googleSignin.hidden = true;
+  if (googleInitTimer) {
+    window.clearTimeout(googleInitTimer);
+    googleInitTimer = null;
+  }
+  googleFallback?.classList.remove("needs-config", "is-loading");
   if (!appConfig.google_client_id) {
+    if (googleSignin) googleSignin.hidden = true;
+    if (googleFallback) googleFallback.hidden = false;
     googleFallback?.classList.add("needs-config");
     googleFallback?.removeAttribute("disabled");
     return;
   }
   if (!googleSignin || !window.google?.accounts?.id) {
+    if (googleSignin) googleSignin.hidden = true;
+    if (googleFallback) googleFallback.hidden = false;
     googleFallback?.classList.add("is-loading");
     googleFallback?.removeAttribute("disabled");
+    googleInitTimer = window.setTimeout(initializeGoogleSignIn, 600);
     return;
   }
   window.google.accounts.id.initialize({
@@ -910,6 +925,22 @@ function initializeGoogleSignIn() {
       });
     },
   });
+  if (!googleButtonRendered) {
+    googleSignin.innerHTML = "";
+    const googleButtonWidth = Math.min(480, Math.max(300, googleSignin.parentElement?.clientWidth || 420));
+    window.google.accounts.id.renderButton(googleSignin, {
+      type: "standard",
+      theme: "outline",
+      size: "large",
+      text: "continue_with",
+      shape: "pill",
+      logo_alignment: "left",
+      width: googleButtonWidth,
+    });
+    googleButtonRendered = true;
+  }
+  googleSignin.hidden = false;
+  if (googleFallback) googleFallback.hidden = true;
   googleFallback?.classList.remove("is-loading");
   googleFallback?.removeAttribute("disabled");
 }
