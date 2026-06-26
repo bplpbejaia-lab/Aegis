@@ -63,7 +63,7 @@ const lowCount = document.querySelector("#low-count");
 const factsPanel = document.querySelector("#facts-panel");
 const findingsList = document.querySelector("#findings-list");
 const hostingList = document.querySelector("#hosting-list");
-const llmOutput = document.querySelector("#llm-output");
+const impactPanel = document.querySelector("#impact-panel");
 const reportModal = document.querySelector("#report-modal");
 const openReportButton = document.querySelector("#open-report");
 const navActions = document.querySelectorAll("[data-nav-target]");
@@ -956,15 +956,16 @@ function initializeGoogleSignIn() {
   });
   if (!googleButtonRendered) {
     googleSignin.innerHTML = "";
-    const googleButtonWidth = Math.min(480, Math.max(300, googleSignin.parentElement?.clientWidth || 420));
+    const googleButtonWidth = 200;
     window.google.accounts.id.renderButton(googleSignin, {
       type: "standard",
-      theme: "filled_black",
+      theme: "outline",
       size: "large",
       text: "continue_with",
-      shape: "pill",
+      shape: "rectangular",
       logo_alignment: "left",
       width: googleButtonWidth,
+      locale: "en",
     });
     googleButtonRendered = true;
   }
@@ -1192,7 +1193,9 @@ function resetRun(target) {
   findingsList.innerHTML = '<p class="panel-placeholder">No findings yet.</p>';
   hostingList.innerHTML =
     '<p class="panel-placeholder">Recommendations will be generated after analysis.</p>';
-  llmOutput.textContent = "Waiting for agent output.";
+  if (impactPanel) {
+    impactPanel.innerHTML = '<p class="panel-placeholder">Impact visualization will appear after analysis.</p>';
+  }
   renderMetrics({
     score: 0,
     posture: "Running",
@@ -1340,8 +1343,8 @@ function renderReport(report) {
     renderFacts(report);
     renderFindings(report.vulnerabilities || []);
     renderHosting(report.hosting_recommendations || []);
+    renderImpactPanel(normalizeImpactFindings(report.vulnerabilities || []));
   }
-  llmOutput.textContent = report.llm?.content || "No agent content returned.";
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
 }
@@ -1396,6 +1399,7 @@ function renderDirectPanels(report) {
   `;
   findingsList.innerHTML = renderDirectFindings(parsed, engineName);
   hostingList.innerHTML = renderDirectSupportSections(parsed);
+  renderImpactPanel(parsed.findings);
 }
 
 function setReportModeLabels(report) {
@@ -1406,16 +1410,16 @@ function setReportModeLabels(report) {
   if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Aelyx report";
   const labels = isDirect
     ? [
-        ["Report overview", `Parsed from raw ${engineName} output`],
+        ["Report overview", `Parsed ${engineName} findings`],
         ["Findings by severity", "Critical to low"],
         ["Evidence and remediation", "Plan, logs, validation"],
-        ["Raw agent output", "Unmodified source"],
+        ["Impact map", "Abuse scenarios"],
       ]
     : [
         ["Facts", "Passive evidence"],
         ["Security findings", "Classified issues"],
         ["Recommended architecture", "Hosting and edge hardening"],
-        ["Full assessment", "Agent output"],
+        ["Impact map", "Abuse scenarios"],
       ];
   labels.forEach(([title, subtitle], index) => {
     const section = sections[index];
@@ -1447,12 +1451,14 @@ function validationModeLabel(mode) {
 
 function parseDirectReport(raw) {
   const sections = splitReportSections(raw);
-  const findings = [];
+  let findings = [];
   for (const severity of ["critical", "high", "medium", "low"]) {
     findings.push(...parseFindingSection(sections.get(`${severity} findings`) || "", severity));
   }
+  findings.push(...parseFindingSection(sections.get("critical / high findings") || "", "high"));
 
   if (!findings.length) findings.push(...parseInlineSeverityFindings(raw));
+  findings = dedupeFindings(findings);
 
   const counts = { critical: 0, high: 0, medium: 0, low: 0 };
   findings.forEach((finding) => {
@@ -1474,6 +1480,7 @@ function splitReportSections(raw) {
   const known = new Set([
     "executive risk summary",
     "critical findings",
+    "critical / high findings",
     "high findings",
     "medium findings",
     "low findings",
@@ -1489,8 +1496,8 @@ function splitReportSections(raw) {
     .replace(/\r\n/g, "\n")
     .split("\n")
     .forEach((line) => {
-      const heading = normalizeReportHeading(line);
-      if (known.has(heading)) {
+      const heading = mapReportHeading(normalizeReportHeading(line));
+      if (known.has(heading) && isReportHeadingLine(line, heading)) {
         if (buffer.join("\n").trim()) sections.set(current, buffer.join("\n").trim());
         current = heading;
         buffer = [];
@@ -1501,6 +1508,51 @@ function splitReportSections(raw) {
 
   if (buffer.join("\n").trim()) sections.set(current, buffer.join("\n").trim());
   return sections;
+}
+
+function isReportHeadingLine(line, mappedHeading) {
+  const rawLine = String(line || "");
+  const raw = rawLine.trim();
+  if (!raw) return false;
+  if (/^\s{2,}/.test(rawLine)) return false;
+  if (raw.length > 96) return false;
+  const plain = stripMarkdown(raw)
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/:$/, "")
+    .trim()
+    .toLowerCase();
+  if (/^(severity|evidence|impact|fix|remediation|recommendation|confidence|abuse path|how it could be used|how someone could use it)\b/.test(plain)) {
+    return false;
+  }
+  if (/^#{1,4}\s+/.test(raw)) return true;
+  if (/^\*\*[^*]{2,80}\*\*:?\s*$/.test(raw)) return true;
+  if (/^\d+[.)]\s+[^:]{2,80}:?\s*$/.test(raw)) return true;
+  return [
+    "executive risk summary",
+    "critical / high findings",
+    "critical findings",
+    "high findings",
+    "medium findings",
+    "low findings",
+    "tested paths / evidence log",
+    "false positives / needs validation",
+    "prioritized remediation plan",
+  ].includes(mappedHeading);
+}
+
+function mapReportHeading(heading) {
+  if (/^(risk snapshot|executive summary|summary|executive risk summary)$/.test(heading)) {
+    return "executive risk summary";
+  }
+  if (/critical.*high.*(finding|vulnerabilit|issue)/.test(heading)) return "critical / high findings";
+  if (/critical.*(finding|vulnerabilit|issue)/.test(heading)) return "critical findings";
+  if (/high.*(finding|vulnerabilit|issue)/.test(heading)) return "high findings";
+  if (/medium.*(finding|vulnerabilit|issue)/.test(heading)) return "medium findings";
+  if (/low.*(finding|vulnerabilit|issue)/.test(heading)) return "low findings";
+  if (/tested paths|evidence log|validation log|test log/.test(heading)) return "tested paths / evidence log";
+  if (/false positive|needs validation|unconfirmed/.test(heading)) return "false positives / needs validation";
+  if (/remediation plan|prioritized remediation|fix plan|priority fix|priority plan/.test(heading)) return "prioritized remediation plan";
+  return heading;
 }
 
 function normalizeReportHeading(line) {
@@ -1516,31 +1568,40 @@ function normalizeReportHeading(line) {
 
 function parseFindingSection(text, fallbackSeverity) {
   const normalized = String(text || "").trim();
-  if (!normalized) return [];
+  if (!normalized || isNoFindingText(normalized)) return [];
 
-  const numberedBlocks = normalized
-    .split(/\n(?=\d+\.\s+\*\*Vulnerability:\*\*)/g)
+  return splitFindingBlocks(normalized)
+    .map((block, index) => findingFromBlock(block, fallbackSeverity, index + 1))
+    .filter(isMeaningfulFinding);
+}
+
+function splitFindingBlocks(text) {
+  const normalized = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!normalized) return [];
+  const blocks = normalized
+    .split(
+      /\n(?=\s*(?:[-*•]\s+|\d+[.)]\s+)(?!(?:\*\*)?(?:evidence|impact|fix|remediation|recommendation|confidence|abuse path|how it|how someone|affected|validation|proof|url|status|header)\b))/gi,
+    )
     .map((block) => block.trim())
     .filter(Boolean);
-  const blocks =
-    numberedBlocks.length > 1 || /^\d+\.\s+\*\*Vulnerability:\*\*/.test(numberedBlocks[0] || "")
-      ? numberedBlocks
-      : normalized
-          .split(/\n(?=-\s+\*\*)/g)
-          .map((block) => block.trim())
-          .filter(Boolean);
-
-  return blocks.map((block, index) => findingFromBlock(block, fallbackSeverity, index + 1));
+  return blocks.length ? blocks : [normalized];
 }
 
 function findingFromBlock(block, fallbackSeverity, index) {
   const fields = extractFindingFields(block);
-  const bulletTitle = block.match(/^-\s+\*\*([^*]+)\*\*:?\s*(.*)$/m);
+  const bulletTitle = block.match(/^\s*(?:[-*•]\s+|\d+[.)]\s+)?\*\*([^*]+)\*\*:?[ \t]*(.*)$/m);
+  const plainTitle = firstFindingLine(block);
   const title =
     fields.vulnerability ||
+    fields.finding ||
+    fields.title ||
     (bulletTitle ? `${bulletTitle[1]}${bulletTitle[2] ? `: ${bulletTitle[2]}` : ""}` : "") ||
+    plainTitle ||
     `${capitalize(fallbackSeverity)} finding ${index}`;
-  const severity = normalizeSeverity(fields.severity || fallbackSeverity);
+  const severity = normalizeSeverity(fields.severity || inferSeverityFromText(block, fallbackSeverity));
   return {
     title: stripMarkdown(title),
     severity,
@@ -1560,24 +1621,98 @@ function findingFromBlock(block, fallbackSeverity, index) {
 function extractFindingFields(block) {
   const fields = {};
   const pattern =
-    /\*\*([^:*]{2,70}):\*\*\s*([\s\S]*?)(?=\n\s*(?:\d+\.\s+)?\*\*[^:*]{2,70}:\*\*|\n\s*-\s+\*\*|$)/g;
+    /\*\*([^:*]{2,70}):\*\*\s*([\s\S]*?)(?=\n\s*(?:[-*•]\s+|\d+[.)]\s+)?\*\*[^:*]{2,70}:\*\*|\n\s*(?:[-*•]\s+|\d+[.)]\s+)(?:\*\*)?(?:vulnerability|finding|title|severity|evidence|impact|fix|remediation|recommendation|confidence|abuse path|how it|how someone)\b|$)/gi;
   let match;
   while ((match = pattern.exec(block))) {
     const key = match[1].trim().toLowerCase();
     fields[key] = match[2].trim();
   }
+  String(block || "")
+    .split("\n")
+    .forEach((line) => {
+      const lineMatch = line.match(
+        /^\s*(?:[-*•]\s+|\d+[.)]\s+)?(?:\*\*)?(vulnerability|finding|title|severity|evidence|impact|fix|remediation|recommendation|confidence|abuse path|how it could be used|how someone could use it)(?:\*\*)?\s*:\s*(.+)$/i,
+      );
+      if (!lineMatch) return;
+      const key = lineMatch[1].trim().toLowerCase();
+      if (!fields[key]) fields[key] = lineMatch[2].trim();
+    });
   return fields;
 }
 
 function parseInlineSeverityFindings(raw) {
-  const fields = extractFindingFields(raw);
-  if (!fields.vulnerability && !fields.evidence) return [];
-  return [findingFromBlock(raw, normalizeSeverity(fields.severity || "medium"), 1)];
+  return splitFindingBlocks(raw)
+    .filter(hasFindingSignal)
+    .map((block, index) => findingFromBlock(block, inferSeverityFromText(block, "medium"), index + 1))
+    .filter(isMeaningfulFinding);
+}
+
+function hasFindingSignal(block) {
+  const text = stripMarkdown(block).toLowerCase();
+  const first = text.split("\n").map((line) => line.trim()).find(Boolean) || "";
+  if (/^(risk snapshot|executive summary|priority fix plan|priority remediation|validation notes|run context)\b/.test(first)) {
+    return false;
+  }
+  return /vulnerability|finding|severity|evidence|impact|fix|remediation|recommendation|abuse path|cve-\d|xss|sql injection|csrf|idor|rce|ssrf|open redirect|hsts|content security policy|csp|caa|dnssec|cookie|cors|directory listing|xmlrpc|wp-|wordpress|admin|exposed|leak|disclosure|takeover|misconfiguration/.test(
+    text,
+  );
+}
+
+function firstFindingLine(block) {
+  const line = String(block || "")
+    .split("\n")
+    .map((item) => item.trim())
+    .find(Boolean);
+  if (!line) return "";
+  const cleaned = stripMarkdown(
+    line
+      .replace(/^\s*(?:[-*•]\s+|\d+[.)]\s+)/, "")
+      .replace(/^\s*(?:vulnerability|finding|title)\s*:\s*/i, ""),
+  );
+  if (!cleaned || /^(severity|evidence|impact|fix|remediation|recommendation|confidence)\s*:/i.test(cleaned)) {
+    return "";
+  }
+  if (isNoFindingText(cleaned)) return "";
+  return cleaned.length > 150 ? `${cleaned.slice(0, 147).trim()}...` : cleaned;
+}
+
+function inferSeverityFromText(text, fallback = "medium") {
+  const normalized = String(text || "").toLowerCase();
+  const explicit = normalized.match(/(?:severity|risk|priority)\s*[:\-]\s*(critical|high|medium|low)\b/);
+  if (explicit) return explicit[1];
+  const tag = normalized.match(/\b(critical|high|medium|low)\b\s+(?:finding|risk|severity|vulnerability|issue)\b/);
+  if (tag) return tag[1];
+  return fallback;
+}
+
+function isMeaningfulFinding(finding) {
+  if (!finding || isNoFindingText(finding.raw || finding.title)) return false;
+  const body = [finding.evidence, finding.usage, finding.impact, finding.fix, finding.confidence].join(" ");
+  if (body.trim()) return true;
+  return !/^(critical|high|medium|low) finding \d+$/i.test(finding.title);
+}
+
+function isNoFindingText(value) {
+  const text = stripMarkdown(value).toLowerCase().replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  return /^(none|n\/a|not observed|no findings|no confirmed|no strongly evidenced|no critical|no high|no medium|no low|nothing confirmed)\b/.test(
+    text,
+  );
+}
+
+function dedupeFindings(findings) {
+  const seen = new Set();
+  return findings.filter((finding) => {
+    const key = `${finding.severity}:${finding.title}:${finding.evidence}`.toLowerCase().replace(/\s+/g, " ");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function renderDirectFindings(parsed, engineName = "Aelyx") {
   if (!parsed.findings.length) {
-    return `<p class="panel-placeholder">No classified findings were parsed. The raw ${escapeHtml(engineName)} report is preserved below.</p>`;
+    return `<p class="panel-placeholder">No classified findings were parsed from the ${escapeHtml(engineName)} assessment.</p>`;
   }
   return ["critical", "high", "medium", "low"]
     .map((severity) => {
@@ -1620,7 +1755,7 @@ function renderDirectSupportSections(parsed) {
   ].filter(([, content]) => content.trim());
 
   if (!cards.length) {
-    return '<p class="panel-placeholder">Evidence and remediation details are available in the raw report below.</p>';
+    return '<p class="panel-placeholder">No separate evidence log or remediation plan was parsed.</p>';
   }
 
   return cards
@@ -1633,6 +1768,145 @@ function renderDirectSupportSections(parsed) {
       `;
     })
     .join("");
+}
+
+function normalizeImpactFindings(findings) {
+  return (findings || [])
+    .map((finding) => {
+      return {
+        title: finding.title || finding.name || "Finding",
+        severity: normalizeSeverity(finding.severity || "low"),
+        evidence: finding.evidence || "",
+        usage: finding.usage || finding["how it could be used"] || finding.abuse_path || "",
+        impact: finding.impact || "",
+        fix: finding.fix || finding.recommendation || "",
+        category: finding.category || "",
+      };
+    })
+    .filter((finding) => finding.title || finding.evidence || finding.impact);
+}
+
+function renderImpactPanel(findings) {
+  if (!impactPanel) return;
+  const normalized = normalizeImpactFindings(findings);
+  if (!normalized.length) {
+    impactPanel.innerHTML = '<p class="panel-placeholder">No impact scenarios were derived from the current findings.</p>';
+    return;
+  }
+  const impacts = buildImpactScores(normalized);
+  const maxScore = Math.max(1, ...impacts.map((impact) => impact.score));
+  impactPanel.innerHTML = `
+    <div class="impact-grid">
+      ${impacts
+        .map((impact) => {
+          const width = impact.score ? Math.max(8, Math.round((impact.score / maxScore) * 100)) : 0;
+          const examples = impact.examples.slice(0, 2).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+          return `
+            <article class="impact-card ${escapeHtml(impact.id)} report-searchable" style="--impact: ${width}%">
+              <div class="impact-head">
+                <span>${escapeHtml(impact.badge)}</span>
+                <strong>${escapeHtml(impact.label)}</strong>
+              </div>
+              <p>${escapeHtml(impact.description)}</p>
+              <div class="impact-meter" aria-hidden="true"><i></i></div>
+              <small>${impact.count} linked finding${impact.count === 1 ? "" : "s"}</small>
+              ${examples ? `<ul>${examples}</ul>` : ""}
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function buildImpactScores(findings) {
+  const catalog = [
+    {
+      id: "data",
+      badge: "DATA",
+      label: "Steal user data",
+      description: "Paths that may expose personal data, credentials, API responses, or internal records.",
+      score: 0,
+      count: 0,
+      examples: [],
+    },
+    {
+      id: "content",
+      badge: "EDIT",
+      label: "Change content",
+      description: "Weaknesses that can lead to defacement, injected scripts, unauthorized edits, or content tampering.",
+      score: 0,
+      count: 0,
+      examples: [],
+    },
+    {
+      id: "account",
+      badge: "ACCT",
+      label: "Account takeover",
+      description: "Session, auth, access-control, or admin exposure that can help compromise accounts.",
+      score: 0,
+      count: 0,
+      examples: [],
+    },
+    {
+      id: "availability",
+      badge: "DOS",
+      label: "DDoS / outage",
+      description: "Resource abuse, rate-limit gaps, public attack surface, or infrastructure exposure affecting uptime.",
+      score: 0,
+      count: 0,
+      examples: [],
+    },
+    {
+      id: "edge",
+      badge: "EDGE",
+      label: "TLS / DNS / browser policy",
+      description: "Hardening gaps that weaken transport, certificate, DNS, or browser-side protections.",
+      score: 0,
+      count: 0,
+      examples: [],
+    },
+  ];
+  findings.forEach((finding) => {
+    const types = findingImpactTypes(finding);
+    const weight = severityWeight(finding.severity);
+    types.forEach((type) => {
+      const impact = catalog.find((item) => item.id === type);
+      if (!impact) return;
+      impact.score += weight;
+      impact.count += 1;
+      if (impact.examples.length < 3) impact.examples.push(finding.title);
+    });
+  });
+  return catalog.sort((left, right) => right.score - left.score || right.count - left.count);
+}
+
+function findingImpactTypes(finding) {
+  const text = [finding.title, finding.category, finding.evidence, finding.usage, finding.impact, finding.fix]
+    .join(" ")
+    .toLowerCase();
+  const types = new Set();
+  if (/data|pii|user|email|credential|password|token|secret|api key|leak|disclosure|exposure|database|backup|dump|cors|idor|bola/.test(text)) {
+    types.add("data");
+  }
+  if (/xss|script|content|deface|edit|write|upload|stored|html|javascript|cms|wordpress|admin|injection|template|page|post|product/.test(text)) {
+    types.add("content");
+  }
+  if (/auth|login|session|cookie|csrf|privilege|admin|takeover|account|mfa|brute|rate limit|idor|access control/.test(text)) {
+    types.add("account");
+  }
+  if (/ddos|dos|outage|availability|resource|flood|rate limit|slow|timeout|open port|attack surface|waf|bot|exhaust/.test(text)) {
+    types.add("availability");
+  }
+  if (/tls|ssl|hsts|csp|content security policy|dns|dnssec|caa|certificate|header|clickjacking|permissions-policy|referrer-policy|mixed content|server header/.test(text)) {
+    types.add("edge");
+  }
+  if (!types.size) types.add("edge");
+  return [...types];
+}
+
+function severityWeight(severity) {
+  return { critical: 8, high: 5, medium: 3, low: 1 }[normalizeSeverity(severity)] || 1;
 }
 
 function renderSeverityBars(counts) {
@@ -1749,7 +2023,7 @@ function renderEmptyReport() {
   `;
   findingsList.innerHTML = '<p class="panel-placeholder">Findings will appear after the first scan.</p>';
   hostingList.innerHTML = '<p class="panel-placeholder">Architecture recommendations will appear after analysis.</p>';
-  llmOutput.textContent = "The agent output will appear after the first completed scan.";
+  renderImpactPanel([]);
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
 }
@@ -1857,7 +2131,9 @@ function showError(message) {
   agentDetail.textContent = message;
   workStatus.textContent = "Needs attention";
   workDetail.textContent = message;
-  llmOutput.textContent = message;
+  if (impactPanel) {
+    impactPanel.innerHTML = `<p class="panel-placeholder">${escapeHtml(message)}</p>`;
+  }
   posture.textContent = "Needs attention";
   summaryLine.textContent = message;
   scoreRing.style.setProperty("--score", 0);
@@ -2019,7 +2295,7 @@ function installLocalPreviewHook() {
     return {
       findingCards: document.querySelectorAll(".direct-finding-card").length,
       supportCards: document.querySelectorAll(".direct-support-card").length,
-      rawLength: llmOutput.textContent.length,
+      impactCards: document.querySelectorAll(".impact-card").length,
     };
   };
 }
