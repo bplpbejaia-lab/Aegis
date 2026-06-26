@@ -305,7 +305,7 @@ async function loadConfig() {
   try {
     appConfig = await apiJson("/api/config", { auth: false });
     renderPlanOptions();
-    syncAllCustomSelects();
+    enforceLockedSelections();
   } catch (error) {
     showAuthMessage(`Config unavailable: ${error.message}`, true);
   }
@@ -398,12 +398,43 @@ function formatLimit(limit) {
 
 function hasAelyxPlanAccess() {
   if (currentUser?.is_admin) return true;
-  const aegisLimit = currentUser?.plan?.limits?.aegis?.limit;
-  return aegisLimit === null || Number(aegisLimit || 0) > 0;
+  return currentUser?.plan?.id === "pro_3";
 }
 
 function isProofModeLocked() {
   return !(appConfig.proof_mode_launched && hasAelyxPlanAccess());
+}
+
+function isAelyxEngineLocked() {
+  return !hasAelyxPlanAccess();
+}
+
+function isLockedSelectOption(select, value) {
+  if (!select) return false;
+  if (select.id === "validation-mode" && value === "proof") return isProofModeLocked();
+  if (select.id === "analysis-engine" && value === "aegis") return isAelyxEngineLocked();
+  return false;
+}
+
+function handleLockedSelectOption(select, shell) {
+  syncCustomSelect(shell);
+  closeCustomSelect(shell);
+  if (select?.id === "analysis-engine") {
+    showError("Aelyx engine is reserved for paid Aelyx users.");
+  }
+  openPreorderModal();
+}
+
+function enforceLockedSelections() {
+  if (analysisEngineInput?.value === "aegis" && isAelyxEngineLocked()) {
+    analysisEngineInput.value = "sheepstealer";
+  }
+  if (validationModeInput?.value === "proof" && isProofModeLocked()) {
+    validationModeInput.value = "safe";
+    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
+  }
+  syncAllCustomSelects();
+  updateProofConsentVisibility();
 }
 
 function initializeCustomSelects() {
@@ -427,15 +458,13 @@ function initializeCustomSelects() {
       item.className = "custom-select-option";
       item.setAttribute("role", "option");
       item.dataset.value = option.value;
-      if (select.id === "validation-mode" && option.value === "proof") {
+      if (isLockedSelectOption(select, option.value)) {
         item.classList.add("is-locked");
       }
       item.textContent = option.textContent;
       item.addEventListener("click", () => {
-        if (select.id === "validation-mode" && option.value === "proof" && isProofModeLocked()) {
-          syncCustomSelect(shell);
-          closeCustomSelect(shell);
-          openPreorderModal();
+        if (isLockedSelectOption(select, option.value)) {
+          handleLockedSelectOption(select, shell);
           return;
         }
         select.value = option.value;
@@ -468,7 +497,7 @@ function syncCustomSelect(shell) {
   button.textContent = selected?.textContent || "";
   menu.querySelectorAll(".custom-select-option").forEach((item) => {
     const isSelected = item.dataset.value === select.value;
-    const isLocked = select.id === "validation-mode" && item.dataset.value === "proof" && isProofModeLocked();
+    const isLocked = isLockedSelectOption(select, item.dataset.value);
     item.classList.toggle("is-selected", isSelected);
     item.classList.toggle("is-locked", isLocked);
     item.setAttribute("aria-selected", String(isSelected));
@@ -514,7 +543,7 @@ function renderSession() {
   }
   renderProfileCard();
   renderAelyxPreorderState();
-  syncAllCustomSelects();
+  enforceLockedSelections();
   if (!signedIn) {
     closeAccountModal();
     if (adminDashboard) adminDashboard.hidden = true;
@@ -930,7 +959,7 @@ function initializeGoogleSignIn() {
     const googleButtonWidth = Math.min(480, Math.max(300, googleSignin.parentElement?.clientWidth || 420));
     window.google.accounts.id.renderButton(googleSignin, {
       type: "standard",
-      theme: "outline",
+      theme: "filled_black",
       size: "large",
       text: "continue_with",
       shape: "pill",
@@ -952,8 +981,19 @@ async function runAnalysis() {
     return;
   }
   const target = normalizeTargetInput(targetInput.value);
+  const selectedEngine = analysisEngineInput?.value || "sheepstealer";
   const validationMode = validationModeInput?.value || "safe";
   const proofAuthorized = Boolean(proofAuthorizedInput?.checked);
+  if (selectedEngine === "aegis" && isAelyxEngineLocked()) {
+    showError("Aelyx engine is reserved for paid Aelyx users.");
+    openPreorderModal();
+    return;
+  }
+  if (validationMode === "proof" && isProofModeLocked()) {
+    showError("Proof mode is reserved for Aelyx users after launch.");
+    openPreorderModal();
+    return;
+  }
   if (validationMode === "proof" && !proofAuthorized) {
     showError("Proof mode requires separate reversible-proof authorization.");
     proofAuthorizedInput?.focus();
@@ -975,7 +1015,7 @@ async function runAnalysis() {
   agentDetail.textContent = "Preparing Aelyx tools.";
   workStatus.textContent = "Running";
   workDetail.textContent = "Preparing Aelyx tools.";
-  showThinkingModal(target, analysisEngineInput?.value || "aegis");
+  showThinkingModal(target, selectedEngine);
 
   try {
     const token = window.localStorage.getItem(SESSION_KEY);
@@ -989,7 +1029,7 @@ async function runAnalysis() {
       body: JSON.stringify({
         target,
         authorized: authorizedInput.checked,
-        engine: analysisEngineInput?.value || "aegis",
+        engine: selectedEngine,
         validation_mode: validationMode,
         proof_authorized: proofAuthorized,
         client_run_id: currentRunId,

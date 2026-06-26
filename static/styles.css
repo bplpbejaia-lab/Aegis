@@ -1383,20 +1383,70 @@ button:disabled {
   top: 12px;
   right: 12px;
   z-index: 2;
+  display: grid;
   width: 34px;
   height: 34px;
-  border: 0;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 50%;
-  background: var(--panel-3);
+  background:
+    radial-gradient(circle at 35% 22%, rgba(255, 255, 255, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)),
+    var(--panel-3);
   color: var(--muted);
-  font-size: 18px;
+  padding: 0;
+  font-size: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 12px 28px rgba(0, 0, 0, 0.38);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.auth-close::before,
+.auth-close::after,
+.modal-close::before,
+.modal-close::after,
+.thinking-close::before,
+.thinking-close::after {
+  position: absolute;
+  width: 14px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
+}
+
+.auth-close::before,
+.modal-close::before,
+.thinking-close::before {
+  transform: rotate(45deg);
+}
+
+.auth-close::after,
+.modal-close::after,
+.thinking-close::after {
+  transform: rotate(-45deg);
 }
 
 .auth-close:hover,
 .modal-close:hover,
 .thinking-close:hover {
-  background: var(--panel-4);
-  color: var(--ink);
+  border-color: rgba(30, 215, 96, 0.48);
+  background:
+    radial-gradient(circle at 35% 22%, rgba(255, 255, 255, 0.22), transparent 34%),
+    linear-gradient(180deg, rgba(30, 215, 96, 0.22), rgba(30, 215, 96, 0.08)),
+    #111;
+  color: var(--accent);
+  box-shadow:
+    0 0 0 3px rgba(30, 215, 96, 0.12),
+    0 16px 34px rgba(0, 0, 0, 0.46);
+  transform: translateY(-1px) scale(1.04);
 }
 
 .auth-copy {
@@ -1544,14 +1594,21 @@ button:disabled {
 
 #google-signin {
   display: grid;
-  min-height: 48px;
+  width: min(100%, 420px);
+  min-height: 50px;
+  justify-self: center;
   overflow: hidden;
   place-items: center;
+  padding: 3px;
+  border: 1px solid rgba(30, 215, 96, 0.42);
   border-radius: 999px;
-  background: #fff;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(30, 215, 96, 0.2), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02)),
+    #070707;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.75),
-    0 14px 32px rgba(0, 0, 0, 0.32);
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 14px 32px rgba(0, 0, 0, 0.38);
 }
 
 #google-signin[hidden],
@@ -1563,6 +1620,7 @@ button:disabled {
 #google-signin iframe {
   width: 100% !important;
   max-width: none !important;
+  min-height: 44px !important;
   border-radius: 999px !important;
 }
 

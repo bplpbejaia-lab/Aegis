@@ -81,9 +81,9 @@ PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
     "free": {
         "label": "Free",
         "price": "$0",
-        "description": "1 Aelyx request per month, enforced by account and IP.",
+        "description": "Free workspace access. Aelyx is reserved for paid launch plans.",
         "limits": {
-            "aegis": {"limit": 1, "period": "month"},
+            "aegis": {"limit": 0, "period": "day"},
             "sheepstealer": {"limit": 0, "period": "day"},
         },
     },
@@ -657,9 +657,7 @@ def has_aegis_plan_access(user: dict[str, Any]) -> bool:
     if user.get("is_admin"):
         return True
     plan_id = normalize_plan(user["plan"]["id"])
-    limit_config = PLAN_DEFINITIONS[plan_id]["limits"].get("aegis", {})
-    limit = limit_config.get("limit")
-    return limit is None or int(limit or 0) > 0
+    return plan_id == "pro_3"
 
 
 def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
@@ -1197,6 +1195,17 @@ async def run_analysis(
         target_url = await asyncio.to_thread(normalize_target, payload.target)
         selected_engine = normalize_analysis_engine(payload.engine)
         validation_mode = normalize_validation_mode(payload.validation_mode)
+        if selected_engine == "aegis" and not has_aegis_plan_access(auth_context):
+            yield event(
+                "error",
+                {
+                    "message": (
+                        "Aelyx engine is reserved for paid Aelyx users. "
+                        "Pre-register for Aelyx early access first."
+                    )
+                },
+            )
+            return
         if validation_mode == "proof" and not (
             PROOF_MODE_LAUNCHED and has_aegis_plan_access(auth_context)
         ):
