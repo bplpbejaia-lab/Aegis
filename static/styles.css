@@ -36,6 +36,10 @@ body {
   min-height: 100%;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
   overflow-x: hidden;
@@ -656,20 +660,6 @@ button:disabled {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.9;
-}
-
-.instagram-mark {
-  border: 0;
-  background:
-    radial-gradient(circle at 32% 102%, #feda75 0 21%, transparent 22%),
-    radial-gradient(circle at 12% 88%, #fa7e1e 0 25%, transparent 26%),
-    radial-gradient(circle at 78% 12%, #515bd4 0 28%, transparent 29%),
-    linear-gradient(135deg, #833ab4, #fd1d1d 48%, #fcb045);
-  color: #fff;
-}
-
-.instagram-mark svg {
-  stroke-width: 1.8;
 }
 
 .footer-status {
@@ -2934,6 +2924,17 @@ button:disabled {
   background: var(--medium);
 }
 
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (max-width: 1020px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -2983,14 +2984,37 @@ button:disabled {
 }
 
 @media (max-width: 720px) {
-  .app-shell {
-    padding: 6px;
+  html {
+    scroll-padding-top: 92px;
   }
 
-  .top-nav-inner,
+  .app-shell {
+    display: block;
+    min-height: 100dvh;
+    padding: 0 0 18px;
+    background:
+      radial-gradient(circle at 50% -12%, rgba(30, 215, 96, 0.16), transparent 42%),
+      #000;
+  }
+
+  .top-nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    padding: max(8px, env(safe-area-inset-top)) 8px 8px;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.46), transparent);
+    backdrop-filter: blur(18px);
+  }
+
+  .top-nav-inner {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+  }
+
   .nav-pills,
   .footer-links,
-  .target-stage,
   .input-frame,
   .capability-grid,
   .account-panel,
@@ -3008,35 +3032,135 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .profile-card {
+    grid-template-columns: 36px;
+    justify-content: center;
+    width: 46px;
+    min-height: 46px;
+    border-radius: 18px;
+    background: rgba(18, 18, 18, 0.72);
+    padding: 5px;
+    backdrop-filter: blur(22px);
+  }
+
+  .profile-card::before {
+    inset: -56px auto auto -56px;
+    width: 124px;
+    height: 124px;
+  }
+
+  .profile-avatar {
+    width: 36px;
+    height: 36px;
+    font-size: 15px;
+  }
+
+  .profile-copy,
+  .profile-dot {
+    display: none;
+  }
+
+  .nav-pills {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    border-radius: 18px;
+    background: rgba(18, 18, 18, 0.68);
+    padding: 6px;
+    backdrop-filter: blur(22px);
+  }
+
+  .nav-pills button,
+  .nav-pills a,
+  .session-pill {
+    justify-content: center;
+    min-height: 38px;
+    border-radius: 14px;
+    padding: 0 6px;
+    text-align: center;
+    font-size: 12px;
+  }
+
+  .minimal-shell {
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "target"
+      "work"
+      "live";
+    gap: 8px;
+    padding: 0 8px;
+  }
+
   .target-stage {
-    min-height: 620px;
-    padding: 26px 18px;
+    display: flex;
+    flex-direction: column;
+    align-content: initial;
+    min-height: auto;
+    border-radius: 22px;
+    padding: 14px;
+    animation: panel-enter 420ms ease both;
+  }
+
+  .target-stage::before,
+  .target-stage::after {
+    opacity: 0.35;
   }
 
   .signal-field {
     display: none;
   }
 
+  .hero-kicker,
+  .capability-grid {
+    display: none;
+  }
+
+  .target-console {
+    order: 1;
+    width: 100%;
+  }
+
   .target-stage h1 {
-    font-size: 50px;
+    order: 2;
+    margin-top: 18px;
+    font-size: clamp(34px, 11vw, 48px);
+    letter-spacing: -0.035em;
+    line-height: 0.98;
   }
 
   .hero-subtitle {
+    order: 3;
+    margin: 8px 0 0;
     font-size: 15px;
+    line-height: 1.4;
   }
 
   .input-frame {
-    border-radius: 18px;
-    padding: 12px;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 10px;
+    min-height: 0;
+    border-radius: 24px;
+    padding: 10px;
+    box-shadow:
+      0 0 0 1px rgba(30, 215, 96, 0.08),
+      0 18px 48px rgba(0, 0, 0, 0.42);
   }
 
   .input-prefix {
     justify-self: start;
   }
 
+  #target {
+    height: 42px;
+    font-size: 16px;
+  }
+
   #run-button,
   #stop-button {
+    grid-column: 1 / -1;
     width: 100%;
+    height: 46px;
   }
 
   .agent-strip,
@@ -3047,27 +3171,158 @@ button:disabled {
     border-radius: 18px;
   }
 
-  .capability-grid {
+  .console-meta {
+    margin-top: 10px;
     gap: 8px;
   }
 
+  .consent-row,
+  .engine-row {
+    width: 100%;
+    justify-content: space-between;
+    min-height: 42px;
+    border-radius: 16px;
+  }
+
+  .select-shell {
+    min-width: 150px;
+  }
+
+  .agent-strip {
+    order: 4;
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px 12px;
+  }
+
+  .progress-track {
+    order: 5;
+    width: 100%;
+  }
+
+  .work-board,
+  .chat-feed,
+  .site-footer {
+    border-radius: 22px;
+    animation: panel-enter 460ms ease both;
+  }
+
+  .work-board {
+    padding: 16px;
+  }
+
+  .work-heading h2 {
+    font-size: 24px;
+  }
+
+  .work-steps li {
+    align-items: flex-start;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .chat-feed {
+    min-height: 320px;
+    padding: 14px;
+  }
+
+  .chat-message {
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .message-avatar {
+    width: 30px;
+    height: 30px;
+    font-size: 13px;
+  }
+
+  .message-body,
+  .user-bubble {
+    padding: 11px 12px;
+    font-size: 13px;
+  }
+
+  .auth-screen,
+  .thinking-modal,
+  .report-modal {
+    align-items: start;
+    justify-items: center;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: max(10px, env(safe-area-inset-top)) 8px max(10px, env(safe-area-inset-bottom));
+  }
+
   .report-dialog {
-    width: min(100% - 14px, 1120px);
-    height: min(100% - 14px, 900px);
+    width: min(100%, 1120px);
+    height: auto;
+    max-height: calc(100dvh - max(20px, env(safe-area-inset-top)) - max(20px, env(safe-area-inset-bottom)));
+    border-radius: 22px;
+    animation: panel-enter 240ms ease both;
+  }
+
+  .modal-header {
+    align-items: center;
+    min-height: 66px;
+    padding: 16px 58px 12px 16px;
+  }
+
+  .modal-header h2 {
+    font-size: 24px;
+    line-height: 1.05;
+  }
+
+  .report-search {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    padding: 10px 16px;
+  }
+
+  .report-search span {
+    font-size: 11px;
+  }
+
+  .report-search input {
+    min-height: 36px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 0 10px;
   }
 
   .modal-content {
     padding: 14px 12px 18px;
   }
 
+  .score-card {
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .score-ring {
+    width: 74px;
+    height: 74px;
+  }
+
+  .severity-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .thinking-dialog,
   .auth-dialog {
-    width: min(100% - 14px, 780px);
+    width: min(100%, 780px);
+    max-height: calc(100dvh - max(20px, env(safe-area-inset-top)) - max(20px, env(safe-area-inset-bottom)));
+    overflow: auto;
+    border-radius: 22px;
     padding: 16px;
+    animation: panel-enter 240ms ease both;
   }
 
   .thinking-orbit {
     justify-self: center;
+  }
+
+  .thinking-stages {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .direct-overview-card {
@@ -3077,5 +3332,53 @@ button:disabled {
   .direct-meta-card div {
     grid-template-columns: 1fr;
     gap: 3px;
+  }
+
+  .site-footer {
+    margin: 8px;
+    padding: 16px;
+  }
+
+  .footer-brand,
+  .footer-link {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .footer-logo,
+  .footer-icon {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-width: 360px) {
+  .input-frame {
+    grid-template-columns: 1fr;
+  }
+
+  .input-prefix {
+    display: none;
+  }
+
+  #target {
+    width: 100%;
+  }
+
+  .nav-pills button,
+  .nav-pills a,
+  .session-pill {
+    padding: 0 4px;
+    font-size: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
   }
 }

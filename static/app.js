@@ -715,6 +715,7 @@ function openPreorderModal() {
   renderAelyxPreorderState();
   preorderModal.hidden = false;
   document.body.classList.add("modal-open");
+  resetModalScroll(preorderModal);
 }
 
 function closePreorderModal() {
@@ -751,6 +752,7 @@ function openAuthModal(tab = "login") {
   if (!authModal) return;
   authModal.hidden = false;
   document.body.classList.add("modal-open");
+  resetModalScroll(authModal);
   window.setTimeout(() => {
     const selector =
       tab === "signup"
@@ -773,6 +775,7 @@ function openAccountModal() {
   if (!accountModal) return;
   accountModal.hidden = false;
   document.body.classList.add("modal-open");
+  resetModalScroll(accountModal);
   accountPlanInput?.focus();
   if (currentUser?.is_admin) loadAdminDashboard();
 }
@@ -1268,6 +1271,7 @@ function renderWorkStep(step) {
 function showThinkingModal(target, engine) {
   if (!thinkingModal) return;
   thinkingModal.hidden = false;
+  resetModalScroll(thinkingModal);
   thinkingTarget.textContent = target || "-";
   thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aelyx";
   thinkingQuota.textContent = "checking";
@@ -2178,6 +2182,7 @@ function openReportModal() {
   if (!reportModal) return;
   reportModal.hidden = false;
   document.body.classList.add("modal-open");
+  resetModalScroll(reportModal);
   reportModal.querySelector(".modal-close")?.focus();
 }
 
@@ -2206,6 +2211,14 @@ function scrollToLive() {
 
 function scrollToWork() {
   workBoard?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetModalScroll(modal) {
+  if (!modal) return;
+  modal.scrollTop = 0;
+  modal.querySelectorAll(".modal-content, .account-dialog, .auth-dialog, .thinking-dialog").forEach((node) => {
+    node.scrollTop = 0;
+  });
 }
 
 function normalizeTargetInput(value) {
