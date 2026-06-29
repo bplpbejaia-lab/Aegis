@@ -35,19 +35,11 @@ const adminDashboard = document.querySelector("#admin-dashboard");
 const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashboard");
 const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
-const adminUsers = document.querySelector("#admin-users");
 const adminPreorders = document.querySelector("#admin-preorders");
 const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
-const adminIps = document.querySelector("#admin-ips");
-const adminTopPaths = document.querySelector("#admin-top-paths");
-const adminReferrers = document.querySelector("#admin-referrers");
-const adminGeo = document.querySelector("#admin-geo");
-const adminDevices = document.querySelector("#admin-devices");
 const adminCampaigns = document.querySelector("#admin-campaigns");
 const adminSessions = document.querySelector("#admin-sessions");
-const adminVisitEvents = document.querySelector("#admin-visit-events");
-const adminActivityLogs = document.querySelector("#admin-activity-logs");
 const adminPeriodTabs = document.querySelectorAll("[data-admin-period]");
 const adminPeriodNote = document.querySelector("#admin-period-note");
 const authMessage = document.querySelector("#auth-message");
@@ -867,47 +859,32 @@ async function loadAdminDashboard() {
 function setAdminLoading() {
   if (adminSummary) adminSummary.innerHTML = '<p class="admin-empty">Loading dashboard...</p>';
   if (adminLiveRuns) adminLiveRuns.innerHTML = "";
-  if (adminUsers) adminUsers.innerHTML = "";
   if (adminPreorders) adminPreorders.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
   if (adminVisitors) adminVisitors.innerHTML = "";
-  if (adminIps) adminIps.innerHTML = "";
-  if (adminTopPaths) adminTopPaths.innerHTML = "";
-  if (adminReferrers) adminReferrers.innerHTML = "";
-  if (adminGeo) adminGeo.innerHTML = "";
-  if (adminDevices) adminDevices.innerHTML = "";
   if (adminCampaigns) adminCampaigns.innerHTML = "";
   if (adminSessions) adminSessions.innerHTML = "";
-  if (adminVisitEvents) adminVisitEvents.innerHTML = "";
-  if (adminActivityLogs) adminActivityLogs.innerHTML = "";
 }
 
 function renderAdminDashboard(data) {
   adminDashboardData = data || adminDashboardData || {};
   const dashboard = adminDashboardData || {};
   const insights = selectedAdminInsights(dashboard);
-  const stats = insights.stats || {};
   const sessionStats = insights.session_stats || {};
-  const activityStats = insights.activity_stats || {};
   const summary = dashboard.summary || {};
-  const externalVisitors = (insights.visitors || []).filter((visitor) => !visitor.user_id);
+  const visitors = insights.visitors || [];
   renderAdminPeriodTabs();
   if (adminSummary) {
     adminSummary.innerHTML = [
-      ["Users", summary.users || 0],
-      ["Active sessions", summary.active_sessions || 0],
+      ["Runs", summary.runs || 0],
+      ["Live runs", summary.live_runs || 0],
       ["Pre-regs", summary.preorders || 0],
-      ["Distinct visitors", sessionStats.session_visitors || stats.unique_visitors || 0],
-      ["External visitors", stats.external_visitors || 0],
-      ["Distinct IPs", sessionStats.unique_ips || stats.unique_ips || 0],
-      ["Sessions", sessionStats.sessions || 0],
-      ["Visits", stats.visits || 0],
+      ["Distinct visitors", sessionStats.session_visitors || summary.unique_visitors || 0],
+      ["External visitors", sessionStats.external_visitors || 0],
+      ["Sessions", sessionStats.sessions || summary.visitor_sessions || 0],
       ["Avg time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
       ["Engaged", sessionStats.engaged_sessions || 0],
       ["Conversions", sessionStats.preorder_conversions || 0],
-      ["API hits", stats.api_hits || 0],
-      ["Activity logs", activityStats.logs || 0],
-      ["Errors", stats.error_hits || summary.problem_runs || 0],
     ]
       .map(
         ([label, value]) => `
@@ -933,31 +910,15 @@ function renderAdminDashboard(data) {
     "No live runs.",
   );
   renderAdminTable(
-    adminUsers,
-    dashboard.users || [],
-    ["User", "Plan", "Provider", "Pre-reg", "Sessions", "Runs", "Seen"],
-    (user) => [
-      user.username,
-      user.is_admin ? "admin" : user.plan,
-      user.provider,
-      user.aegis_waitlist_at ? relativeTime(user.aegis_waitlist_at) : "-",
-      user.active_sessions || 0,
-      user.total_runs || 0,
-      relativeTime(user.last_seen_at || user.last_run_at || user.created_at),
-    ],
-    "No users yet.",
-  );
-  renderAdminTable(
     adminPreorders,
     dashboard.preorders || [],
-    ["Reserved", "User", "Email", "Plan", "Provider", "Admin"],
+    ["Reserved", "User", "Email", "Plan", "Provider"],
     (user) => [
       relativeTime(user.aegis_waitlist_at),
       user.username,
       user.email || "-",
       user.is_admin ? "admin" : user.plan,
       user.provider,
-      user.is_admin ? "yes" : "no",
     ],
     "No Aelyx pre-registrations yet.",
   );
@@ -979,92 +940,22 @@ function renderAdminDashboard(data) {
   );
   renderAdminTable(
     adminVisitors,
-    externalVisitors,
-    ["Visitor ID", "IPs", "Sessions", "Pages", "Time", "Region", "Device", "Source", "Last path", "Seen"],
+    visitors,
+    ["Visitor ID", "Sessions", "Pages", "Time", "Region", "Device", "Source", "Landing", "Last path", "Seen", "Pre-reg"],
     (visitor) => [
       shortVisitorId(visitor.visitor_id),
-      visitor.unique_ips || 0,
       visitor.sessions || 0,
       visitor.page_views || 0,
       formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000),
       visitorRegion(visitor),
       visitorDevice(visitor),
       visitorSource(visitor),
+      compactPath(visitor.landing_path),
       compactPath(visitor.last_path),
       relativeTime(visitor.last_seen_at),
+      Number(visitor.converted_preorder || 0) ? "yes" : "no",
     ],
     "No visitors in this period.",
-  );
-  renderAdminTable(
-    adminIps,
-    insights.ips || [],
-    ["IP", "Visitors", "Sessions", "External", "Pages", "Time", "Region", "Device", "Source", "Last seen"],
-    (ip) => [
-      ip.ip_address || "unknown",
-      ip.visitors || 0,
-      ip.sessions || 0,
-      ip.external_sessions || 0,
-      ip.page_views || 0,
-      formatDuration((ip.max_duration_seconds || ip.avg_duration_seconds || 0) * 1000),
-      visitorRegion(ip),
-      visitorDevice(ip),
-      visitorSource(ip),
-      relativeTime(ip.last_seen_at),
-    ],
-    "No distinct IPs in this period.",
-  );
-  renderAdminTable(
-    adminTopPaths,
-    insights.top_paths || [],
-    ["Path", "Hits", "Visitors", "Errors", "Seen"],
-    (route) => [
-      compactPath(route.path),
-      route.hits || 0,
-      route.visitors || 0,
-      route.errors || 0,
-      relativeTime(route.last_seen_at),
-    ],
-    "No route activity in this period.",
-  );
-  renderAdminTable(
-    adminReferrers,
-    insights.top_referrers || [],
-    ["Source", "Hits", "Visitors", "Seen"],
-    (source) => [
-      compactReferrer(source.referrer),
-      source.hits || 0,
-      source.visitors || 0,
-      relativeTime(source.last_seen_at),
-    ],
-    "No external referrers in this period.",
-  );
-  renderAdminTable(
-    adminGeo,
-    insights.geo || [],
-    ["Region", "Sessions", "Visitors", "Pages", "Avg time", "Conv."],
-    (geo) => [
-      [geo.country, geo.region, geo.city].filter(Boolean).join(" / "),
-      geo.sessions || 0,
-      geo.visitors || 0,
-      geo.page_views || 0,
-      formatDuration((geo.avg_duration_seconds || 0) * 1000),
-      geo.conversions || 0,
-    ],
-    "No regional data in this period.",
-  );
-  renderAdminTable(
-    adminDevices,
-    insights.devices || [],
-    ["Device", "Browser", "OS", "Sessions", "Visitors", "Avg time"],
-    (device) => [
-      device.device_type || "unknown",
-      device.browser || "unknown",
-      device.os || "unknown",
-      device.sessions || 0,
-      device.visitors || 0,
-      formatDuration((device.avg_duration_seconds || 0) * 1000),
-    ],
-    "No device data in this period.",
   );
   renderAdminTable(
     adminCampaigns,
@@ -1085,12 +976,10 @@ function renderAdminDashboard(data) {
   renderAdminTable(
     adminSessions,
     insights.sessions || [],
-    ["Seen", "Visitor", "Region", "Device", "Landing", "Last page", "Pages", "Time", "Source", "Conv."],
+    ["Seen", "Visitor", "Landing", "Last page", "Pages", "Time", "Source", "Pre-reg"],
     (session) => [
       relativeTime(session.last_seen_at),
       shortVisitorId(session.visitor_id),
-      visitorRegion(session),
-      visitorDevice(session),
       compactPath(session.landing_path),
       compactPath(session.last_path),
       session.page_views || 0,
@@ -1099,38 +988,6 @@ function renderAdminDashboard(data) {
       Number(session.converted_preorder || 0) ? "yes" : "no",
     ],
     "No visitor sessions in this period.",
-  );
-  renderAdminTable(
-    adminVisitEvents,
-    insights.recent_visits || [],
-    ["When", "Visitor", "Region", "Device", "User", "IP", "Method", "Path", "Status", "Referrer"],
-    (visit) => [
-      relativeTime(visit.created_at),
-      shortVisitorId(visit.visitor_id),
-      visitorRegion(visit),
-      visitorDevice(visit),
-      visit.user_id ? `user #${visit.user_id}` : "external",
-      visit.ip_address || "n/a",
-      visit.method || "GET",
-      pathWithQuery(visit),
-      visit.status_code || 0,
-      compactReferrer(visit.referrer),
-    ],
-    "No visit events in this period.",
-  );
-  renderAdminTable(
-    adminActivityLogs,
-    insights.activity || [],
-    ["When", "User", "Type", "Action", "IP", "Data"],
-    (entry) => [
-      relativeTime(entry.created_at),
-      entry.user_id ? `user #${entry.user_id}` : "system",
-      entry.category || "log",
-      entry.action || "event",
-      entry.ip_address || "n/a",
-      metadataPreview(entry.metadata),
-    ],
-    "No activity logs in this period.",
   );
 }
 
@@ -1162,19 +1019,10 @@ function renderAdminTable(container, rows, headings, rowMapper, emptyText) {
 function selectedAdminInsights(data) {
   const insights = data?.visitor_insights || {};
   return insights[adminSelectedPeriod] || insights.day || {
-    stats: {},
     session_stats: {},
-    activity_stats: {},
     visitors: [],
-    ips: [],
     sessions: [],
-    geo: [],
-    devices: [],
     campaigns: [],
-    top_paths: [],
-    top_referrers: [],
-    recent_visits: data?.visits || [],
-    activity: data?.activity || [],
   };
 }
 
@@ -1230,22 +1078,6 @@ function visitorSource(value) {
     return [source || "direct", medium || "none", campaign || "none"].join(" / ");
   }
   return compactReferrer(value?.last_referrer || value?.referrer || "");
-}
-
-function pathWithQuery(visit) {
-  const query = String(visit.query_string || "");
-  const path = String(visit.path || "/");
-  return compactPath(query ? `${path}?${query}` : path);
-}
-
-function metadataPreview(metadata) {
-  if (!metadata) return "";
-  if (typeof metadata === "string") return compactPath(metadata);
-  try {
-    return compactPath(JSON.stringify(metadata));
-  } catch {
-    return compactPath(String(metadata));
-  }
 }
 
 function compactUrl(value) {

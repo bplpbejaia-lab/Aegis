@@ -1437,12 +1437,6 @@ def row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
-ADMIN_VISITOR_WINDOWS: dict[str, str] = {
-    "day": "created_at::timestamptz >= now() - interval '1 day'",
-    "week": "created_at::timestamptz >= now() - interval '7 days'",
-    "month": "created_at::timestamptz >= now() - interval '30 days'",
-    "all": "TRUE",
-}
 ADMIN_SESSION_WINDOWS: dict[str, str] = {
     "day": "last_seen_at::timestamptz >= now() - interval '1 day'",
     "week": "last_seen_at::timestamptz >= now() - interval '7 days'",
@@ -1492,52 +1486,24 @@ def preorder_aegis(user_id: int) -> dict[str, Any]:
 
 def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
     insights: dict[str, Any] = {}
-    for window_id, where_clause in ADMIN_VISITOR_WINDOWS.items():
-        session_clause = ADMIN_SESSION_WINDOWS[window_id]
-        visit_stats = connection.execute(
-            f"""
-            SELECT
-                COUNT(*)::int AS visits,
-                COUNT(DISTINCT visitor_id)::int AS unique_visitors,
-                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NULL)::int AS external_visitors,
-                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_visitors,
-                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
-                COUNT(*) FILTER (WHERE user_id IS NULL)::int AS anonymous_hits,
-                COUNT(*) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_hits,
-                COUNT(*) FILTER (WHERE status_code >= 400)::int AS error_hits,
-                COUNT(*) FILTER (WHERE path LIKE '/api/%')::int AS api_hits
-            FROM visitor_events
-            WHERE {where_clause}
-            """
-        ).fetchone()
+    for window_id, session_clause in ADMIN_SESSION_WINDOWS.items():
         session_stats = connection.execute(
             f"""
             SELECT
                 COUNT(*)::int AS sessions,
                 COUNT(*) FILTER (WHERE user_id IS NULL)::int AS external_sessions,
                 COUNT(DISTINCT visitor_id)::int AS session_visitors,
+                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NULL)::int AS external_visitors,
+                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_visitors,
                 COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
                 COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
                 COALESCE(ROUND(AVG(page_views))::int, 0) AS avg_page_views,
                 COALESCE(SUM(page_views), 0)::int AS page_views,
-                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
                 COUNT(*) FILTER (WHERE duration_seconds >= 30 OR page_views > 1)::int AS engaged_sessions,
                 COUNT(*) FILTER (WHERE page_views <= 1 AND duration_seconds < 15)::int AS bounce_sessions,
                 COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions
             FROM visitor_sessions
             WHERE {session_clause}
-            """
-        ).fetchone()
-        activity_stats = connection.execute(
-            f"""
-            SELECT
-                COUNT(*)::int AS logs,
-                COUNT(*) FILTER (WHERE category = 'auth')::int AS auth_logs,
-                COUNT(*) FILTER (WHERE category = 'account')::int AS account_logs,
-                COUNT(*) FILTER (WHERE category = 'analysis')::int AS analysis_logs,
-                COUNT(DISTINCT user_id)::int AS active_users
-            FROM activity_logs
-            WHERE {where_clause}
             """
         ).fetchone()
         visitors = connection.execute(
@@ -1546,16 +1512,12 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 visitor_id,
                 MAX(user_id) AS user_id,
                 COUNT(*)::int AS sessions,
-                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
                 COALESCE(SUM(page_views), 0)::int AS page_views,
-                COALESCE(SUM(api_hits), 0)::int AS api_hits,
-                COALESCE(SUM(events), 0)::int AS events,
                 COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
                 COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
                 MAX(converted_preorder)::int AS converted_preorder,
                 MIN(started_at) AS first_seen_at,
                 MAX(last_seen_at) AS last_seen_at,
-                (ARRAY_AGG(ip_address ORDER BY last_seen_at DESC))[1] AS last_ip,
                 (ARRAY_AGG(country ORDER BY last_seen_at DESC))[1] AS country,
                 (ARRAY_AGG(region ORDER BY last_seen_at DESC))[1] AS region,
                 (ARRAY_AGG(city ORDER BY last_seen_at DESC))[1] AS city,
@@ -1568,8 +1530,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 (ARRAY_AGG(utm_campaign ORDER BY last_seen_at DESC))[1] AS utm_campaign,
                 (ARRAY_AGG(referrer ORDER BY last_seen_at DESC))[1] AS last_referrer,
                 (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS landing_path,
-                (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path,
-                (ARRAY_AGG(user_agent ORDER BY last_seen_at DESC))[1] AS last_user_agent
+                (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path
             FROM visitor_sessions
             WHERE {session_clause}
             GROUP BY visitor_id
@@ -1577,88 +1538,17 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             LIMIT 100
             """
         ).fetchall()
-        ip_rows = connection.execute(
-            f"""
-            SELECT
-                COALESCE(NULLIF(ip_address, ''), 'unknown') AS ip_address,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                COUNT(*)::int AS sessions,
-                COUNT(*) FILTER (WHERE user_id IS NULL)::int AS external_sessions,
-                COALESCE(SUM(page_views), 0)::int AS page_views,
-                COALESCE(SUM(api_hits), 0)::int AS api_hits,
-                COALESCE(SUM(events), 0)::int AS events,
-                COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
-                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
-                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions,
-                MIN(started_at) AS first_seen_at,
-                MAX(last_seen_at) AS last_seen_at,
-                (ARRAY_AGG(visitor_id ORDER BY last_seen_at DESC))[1] AS last_visitor_id,
-                (ARRAY_AGG(country ORDER BY last_seen_at DESC))[1] AS country,
-                (ARRAY_AGG(region ORDER BY last_seen_at DESC))[1] AS region,
-                (ARRAY_AGG(city ORDER BY last_seen_at DESC))[1] AS city,
-                (ARRAY_AGG(language ORDER BY last_seen_at DESC))[1] AS language,
-                (ARRAY_AGG(device_type ORDER BY last_seen_at DESC))[1] AS device_type,
-                (ARRAY_AGG(browser ORDER BY last_seen_at DESC))[1] AS browser,
-                (ARRAY_AGG(os ORDER BY last_seen_at DESC))[1] AS os,
-                (ARRAY_AGG(utm_source ORDER BY last_seen_at DESC))[1] AS utm_source,
-                (ARRAY_AGG(utm_medium ORDER BY last_seen_at DESC))[1] AS utm_medium,
-                (ARRAY_AGG(utm_campaign ORDER BY last_seen_at DESC))[1] AS utm_campaign,
-                (ARRAY_AGG(referrer ORDER BY last_seen_at DESC))[1] AS last_referrer,
-                (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS first_landing_path,
-                (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path
-            FROM visitor_sessions
-            WHERE {session_clause}
-            GROUP BY 1
-            ORDER BY visitors DESC, sessions DESC, last_seen_at DESC
-            LIMIT 120
-            """
-        ).fetchall()
         session_rows = connection.execute(
             f"""
             SELECT
-                session_id, visitor_id, user_id, ip_address, country, region, city,
+                visitor_id, user_id, country, region, city,
                 timezone, language, device_type, browser, os, referrer, landing_path,
                 last_path, utm_source, utm_medium, utm_campaign, started_at, last_seen_at,
-                duration_seconds, page_views, api_hits, events, heartbeat_count,
-                converted_preorder
+                duration_seconds, page_views, converted_preorder
             FROM visitor_sessions
             WHERE {session_clause}
             ORDER BY last_seen_at DESC
             LIMIT 120
-            """
-        ).fetchall()
-        geo_rows = connection.execute(
-            f"""
-            SELECT
-                COALESCE(NULLIF(country, ''), 'unknown') AS country,
-                COALESCE(NULLIF(region, ''), 'unknown') AS region,
-                COALESCE(NULLIF(city, ''), 'unknown') AS city,
-                COUNT(*)::int AS sessions,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
-                COALESCE(SUM(page_views), 0)::int AS page_views,
-                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
-            FROM visitor_sessions
-            WHERE {session_clause}
-            GROUP BY 1, 2, 3
-            ORDER BY sessions DESC, visitors DESC
-            LIMIT 24
-            """
-        ).fetchall()
-        device_rows = connection.execute(
-            f"""
-            SELECT
-                COALESCE(NULLIF(device_type, ''), 'unknown') AS device_type,
-                COALESCE(NULLIF(browser, ''), 'unknown') AS browser,
-                COALESCE(NULLIF(os, ''), 'unknown') AS os,
-                COUNT(*)::int AS sessions,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds
-            FROM visitor_sessions
-            WHERE {session_clause}
-            GROUP BY 1, 2, 3
-            ORDER BY sessions DESC
-            LIMIT 24
             """
         ).fetchall()
         campaign_rows = connection.execute(
@@ -1679,70 +1569,11 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             LIMIT 24
             """
         ).fetchall()
-        top_paths = connection.execute(
-            f"""
-            SELECT
-                path,
-                COUNT(*)::int AS hits,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                COUNT(*) FILTER (WHERE status_code >= 400)::int AS errors,
-                MAX(created_at) AS last_seen_at
-            FROM visitor_events
-            WHERE {where_clause}
-            GROUP BY path
-            ORDER BY hits DESC, last_seen_at DESC
-            LIMIT 20
-            """
-        ).fetchall()
-        top_referrers = connection.execute(
-            f"""
-            SELECT
-                referrer,
-                COUNT(*)::int AS hits,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                MAX(created_at) AS last_seen_at
-            FROM visitor_events
-            WHERE {where_clause} AND referrer <> ''
-            GROUP BY referrer
-            ORDER BY hits DESC, last_seen_at DESC
-            LIMIT 12
-            """
-        ).fetchall()
-        recent_visits = connection.execute(
-            f"""
-            SELECT
-                id, visitor_id, session_id, user_id, ip_address, country, region, city,
-                language, device_type, browser, os, method, path, query_string,
-                status_code, referrer, user_agent, created_at
-            FROM visitor_events
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT 120
-            """
-        ).fetchall()
-        recent_activity = connection.execute(
-            f"""
-            SELECT id, user_id, category, action, ip_address, user_agent, metadata, created_at
-            FROM activity_logs
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT 120
-            """
-        ).fetchall()
         insights[window_id] = {
-            "stats": row_to_dict(visit_stats),
             "session_stats": row_to_dict(session_stats),
-            "activity_stats": row_to_dict(activity_stats),
             "visitors": [row_to_dict(row) for row in visitors],
-            "ips": [row_to_dict(row) for row in ip_rows],
             "sessions": [row_to_dict(row) for row in session_rows],
-            "geo": [row_to_dict(row) for row in geo_rows],
-            "devices": [row_to_dict(row) for row in device_rows],
             "campaigns": [row_to_dict(row) for row in campaign_rows],
-            "top_paths": [row_to_dict(row) for row in top_paths],
-            "top_referrers": [row_to_dict(row) for row in top_referrers],
-            "recent_visits": [row_to_dict(row) for row in recent_visits],
-            "activity": [row_to_dict(row) for row in recent_activity],
         }
     return insights
 
@@ -1750,34 +1581,6 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
 def admin_dashboard_payload() -> dict[str, Any]:
     now = utc_now()
     with DB_LOCK, db_connect() as connection:
-        user_rows = connection.execute(
-            """
-            SELECT
-                users.id,
-                users.username,
-                users.email,
-                users.provider,
-                users.plan,
-                users.is_admin,
-                users.aegis_waitlist_at,
-                users.created_at,
-                users.updated_at,
-                COUNT(DISTINCT sessions.token) AS active_sessions,
-                MAX(sessions.last_seen_at) AS last_seen_at,
-                COUNT(DISTINCT analysis_runs.id) AS total_runs,
-                SUM(CASE WHEN analysis_runs.status = 'running' THEN 1 ELSE 0 END) AS running_runs,
-                MAX(analysis_runs.updated_at) AS last_run_at
-            FROM users
-            LEFT JOIN sessions
-                ON sessions.user_id = users.id AND sessions.expires_at > %s
-            LEFT JOIN analysis_runs
-                ON analysis_runs.user_id = users.id
-            GROUP BY users.id
-            ORDER BY users.created_at DESC
-            LIMIT 200
-            """,
-            (now,),
-        ).fetchall()
         preorder_rows = connection.execute(
             """
             SELECT
@@ -1805,62 +1608,24 @@ def admin_dashboard_payload() -> dict[str, Any]:
             LIMIT 50
             """
         ).fetchall()
-        usage_rows = connection.execute(
-            """
-            SELECT subject, engine, period_key, count, updated_at
-            FROM usage_counters
-            ORDER BY updated_at DESC
-            LIMIT 200
-            """
-        ).fetchall()
-        visit_rows = connection.execute(
-            """
-            SELECT
-                id, visitor_id, session_id, user_id, ip_address, country, region, city,
-                language, device_type, browser, os, method, path, query_string,
-                status_code, referrer, user_agent, created_at
-            FROM visitor_events
-            ORDER BY created_at DESC
-            LIMIT 200
-            """
-        ).fetchall()
-        activity_rows = connection.execute(
-            """
-            SELECT id, user_id, category, action, ip_address, user_agent, metadata, created_at
-            FROM activity_logs
-            ORDER BY created_at DESC
-            LIMIT 200
-            """
-        ).fetchall()
         summary = connection.execute(
             """
             SELECT
-                (SELECT COUNT(*) FROM users) AS users,
-                (SELECT COUNT(*) FROM sessions WHERE expires_at > %s) AS active_sessions,
                 (SELECT COUNT(*) FROM analysis_runs) AS runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
-                (SELECT COUNT(*) FROM analysis_runs WHERE status = 'completed') AS completed_runs,
-                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('failed', 'blocked')) AS problem_runs,
                 (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
-                (SELECT COUNT(*) FROM visitor_events) AS visits,
-                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_events) AS unique_visitors,
+                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_sessions) AS unique_visitors,
                 (SELECT COUNT(*) FROM visitor_sessions) AS visitor_sessions,
-                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions) AS avg_session_seconds,
-                (SELECT COUNT(*) FROM activity_logs) AS activity_logs
-            """,
-            (now,),
+                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions) AS avg_session_seconds
+            """
         ).fetchone()
         visitor_insights = admin_visitor_insights(connection)
 
     return {
         "summary": row_to_dict(summary),
-        "users": [row_to_dict(row) for row in user_rows],
         "preorders": [row_to_dict(row) for row in preorder_rows],
         "live_runs": [row_to_dict(row) for row in live_rows],
         "recent_runs": [row_to_dict(row) for row in run_rows],
-        "usage": [row_to_dict(row) for row in usage_rows],
-        "visits": [row_to_dict(row) for row in visit_rows],
-        "activity": [row_to_dict(row) for row in activity_rows],
         "visitor_insights": visitor_insights,
         "generated_at": now,
     }
