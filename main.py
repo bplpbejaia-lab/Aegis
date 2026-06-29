@@ -45,6 +45,7 @@ PUBLIC_MODEL_LABEL = "sheepstealer"
 DATABASE_URL = (os.getenv("AEGIS_DATABASE_URL") or os.getenv("DATABASE_URL") or "").strip()
 POSTGRES_SCHEMES = ("postgres://", "postgresql://")
 VISITOR_COOKIE_NAME = "aegis_vid"
+VISITOR_SESSION_COOKIE_NAME = "aegis_sid"
 LOG_STATIC_VISITS = os.getenv("AEGIS_LOG_STATIC_VISITS", "").strip().lower() in {
     "1",
     "true",
@@ -144,6 +145,13 @@ class GoogleAuthRequest(BaseModel):
 
 class PlanRequest(BaseModel):
     plan: str = Field(..., min_length=2, max_length=64)
+
+
+class VisitorHeartbeatRequest(BaseModel):
+    path: str = Field(default="/", max_length=800)
+    title: str = Field(default="", max_length=240)
+    visible: bool = True
+    duration_seconds: int = Field(default=0, ge=0, le=86_400)
 
 
 class PageParser(HTMLParser):
@@ -369,9 +377,18 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS visitor_events (
                 id BIGSERIAL PRIMARY KEY,
                 visitor_id TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
                 user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
                 session_token_hash TEXT NOT NULL DEFAULT '',
                 ip_address TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                region TEXT NOT NULL DEFAULT '',
+                city TEXT NOT NULL DEFAULT '',
+                timezone TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT '',
+                device_type TEXT NOT NULL DEFAULT '',
+                browser TEXT NOT NULL DEFAULT '',
+                os TEXT NOT NULL DEFAULT '',
                 method TEXT NOT NULL,
                 path TEXT NOT NULL,
                 query_string TEXT NOT NULL DEFAULT '',
@@ -379,6 +396,42 @@ def init_db() -> None:
                 referrer TEXT NOT NULL DEFAULT '',
                 user_agent TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS visitor_sessions (
+                session_id TEXT PRIMARY KEY,
+                visitor_id TEXT NOT NULL,
+                user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                session_token_hash TEXT NOT NULL DEFAULT '',
+                ip_address TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                region TEXT NOT NULL DEFAULT '',
+                city TEXT NOT NULL DEFAULT '',
+                timezone TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT '',
+                accept_language TEXT NOT NULL DEFAULT '',
+                device_type TEXT NOT NULL DEFAULT '',
+                browser TEXT NOT NULL DEFAULT '',
+                os TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                referrer TEXT NOT NULL DEFAULT '',
+                landing_path TEXT NOT NULL DEFAULT '',
+                last_path TEXT NOT NULL DEFAULT '',
+                query_string TEXT NOT NULL DEFAULT '',
+                utm_source TEXT NOT NULL DEFAULT '',
+                utm_medium TEXT NOT NULL DEFAULT '',
+                utm_campaign TEXT NOT NULL DEFAULT '',
+                utm_term TEXT NOT NULL DEFAULT '',
+                utm_content TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL DEFAULT 0,
+                page_views INTEGER NOT NULL DEFAULT 0,
+                api_hits INTEGER NOT NULL DEFAULT 0,
+                events INTEGER NOT NULL DEFAULT 0,
+                heartbeat_count INTEGER NOT NULL DEFAULT 0,
+                converted_preorder INTEGER NOT NULL DEFAULT 0
             )
             """,
             """
@@ -401,6 +454,12 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS analysis_runs_status_idx ON analysis_runs(status)",
             "CREATE INDEX IF NOT EXISTS visitor_events_created_at_idx ON visitor_events(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS visitor_events_user_id_idx ON visitor_events(user_id)",
+            "CREATE INDEX IF NOT EXISTS visitor_events_session_id_idx ON visitor_events(session_id)",
+            "CREATE INDEX IF NOT EXISTS visitor_events_country_idx ON visitor_events(country)",
+            "CREATE INDEX IF NOT EXISTS visitor_sessions_last_seen_idx ON visitor_sessions(last_seen_at DESC)",
+            "CREATE INDEX IF NOT EXISTS visitor_sessions_visitor_id_idx ON visitor_sessions(visitor_id)",
+            "CREATE INDEX IF NOT EXISTS visitor_sessions_country_idx ON visitor_sessions(country)",
+            "CREATE INDEX IF NOT EXISTS visitor_sessions_campaign_idx ON visitor_sessions(utm_source, utm_medium, utm_campaign)",
             "CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS activity_logs_user_id_idx ON activity_logs(user_id)",
         ):
@@ -408,6 +467,18 @@ def init_db() -> None:
         ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "analysis_runs", "report_json", "JSONB NOT NULL DEFAULT '{}'::jsonb")
+        for column, definition in {
+            "session_id": "TEXT NOT NULL DEFAULT ''",
+            "country": "TEXT NOT NULL DEFAULT ''",
+            "region": "TEXT NOT NULL DEFAULT ''",
+            "city": "TEXT NOT NULL DEFAULT ''",
+            "timezone": "TEXT NOT NULL DEFAULT ''",
+            "language": "TEXT NOT NULL DEFAULT ''",
+            "device_type": "TEXT NOT NULL DEFAULT ''",
+            "browser": "TEXT NOT NULL DEFAULT ''",
+            "os": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            ensure_column(connection, "visitor_events", column, definition)
         ensure_admin_user(connection)
         connection.commit()
 
@@ -615,6 +686,129 @@ def request_referrer(request: Request) -> str:
     return clamp_log_value(request.headers.get("referer", ""), 1200)
 
 
+def first_header(request: Request, names: list[str]) -> str:
+    for name in names:
+        value = request.headers.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def request_geo_context(request: Request) -> dict[str, str]:
+    return {
+        "country": clamp_log_value(
+            first_header(
+                request,
+                [
+                    "cf-ipcountry",
+                    "x-vercel-ip-country",
+                    "x-country-code",
+                    "x-appengine-country",
+                    "cloudfront-viewer-country",
+                ],
+            ),
+            80,
+        ),
+        "region": clamp_log_value(
+            first_header(
+                request,
+                [
+                    "x-vercel-ip-country-region",
+                    "x-region",
+                    "x-appengine-region",
+                    "cloudfront-viewer-country-region",
+                    "cf-region",
+                ],
+            ),
+            120,
+        ),
+        "city": clamp_log_value(
+            first_header(
+                request,
+                ["x-vercel-ip-city", "x-city", "x-appengine-city", "cf-ipcity"],
+            ),
+            120,
+        ),
+        "timezone": clamp_log_value(
+            first_header(request, ["x-vercel-ip-timezone", "x-timezone", "cf-timezone"]),
+            120,
+        ),
+    }
+
+
+def request_language_context(request: Request) -> dict[str, str]:
+    accept_language = clamp_log_value(request.headers.get("accept-language", ""), 600)
+    primary = accept_language.split(",", 1)[0].strip().lower()
+    return {"accept_language": accept_language, "language": clamp_log_value(primary, 80)}
+
+
+def request_marketing_context(request: Request) -> dict[str, str]:
+    params = request.query_params
+    return {
+        "utm_source": clamp_log_value(params.get("utm_source", ""), 180),
+        "utm_medium": clamp_log_value(params.get("utm_medium", ""), 180),
+        "utm_campaign": clamp_log_value(params.get("utm_campaign", ""), 220),
+        "utm_term": clamp_log_value(params.get("utm_term", ""), 220),
+        "utm_content": clamp_log_value(params.get("utm_content", ""), 220),
+    }
+
+
+def parse_user_agent(user_agent: str) -> dict[str, str]:
+    agent = user_agent.lower()
+    if re.search(r"bot|crawler|spider|preview|slurp|bingbot|googlebot", agent):
+        device_type = "bot"
+    elif "ipad" in agent or "tablet" in agent:
+        device_type = "tablet"
+    elif "mobile" in agent or "iphone" in agent or "android" in agent:
+        device_type = "mobile"
+    else:
+        device_type = "desktop"
+
+    if "edg/" in agent:
+        browser = "Edge"
+    elif "opr/" in agent or "opera" in agent:
+        browser = "Opera"
+    elif "samsungbrowser" in agent:
+        browser = "Samsung Internet"
+    elif "firefox/" in agent:
+        browser = "Firefox"
+    elif "chrome/" in agent or "crios/" in agent:
+        browser = "Chrome"
+    elif "safari/" in agent:
+        browser = "Safari"
+    else:
+        browser = "Unknown"
+
+    if "windows" in agent:
+        os_name = "Windows"
+    elif "iphone" in agent or "ipad" in agent:
+        os_name = "iOS"
+    elif "android" in agent:
+        os_name = "Android"
+    elif "mac os x" in agent or "macintosh" in agent:
+        os_name = "macOS"
+    elif "linux" in agent:
+        os_name = "Linux"
+    else:
+        os_name = "Unknown"
+
+    return {"device_type": device_type, "browser": browser, "os": os_name}
+
+
+def visitor_context(request: Request) -> dict[str, str]:
+    user_agent = request_user_agent(request)
+    return {
+        **request_geo_context(request),
+        **request_language_context(request),
+        **request_marketing_context(request),
+        **parse_user_agent(user_agent),
+        "user_agent": user_agent,
+        "referrer": request_referrer(request),
+        "path": clamp_log_value(request.url.path, 800),
+        "query_string": redacted_query_string(request),
+    }
+
+
 def request_is_secure(request: Request) -> bool:
     forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
     return forwarded_proto == "https" or request.url.scheme == "https"
@@ -623,6 +817,8 @@ def request_is_secure(request: Request) -> bool:
 def should_log_visit(request: Request) -> bool:
     path = request.url.path
     if path == "/health":
+        return False
+    if path == "/api/visitor/heartbeat":
         return False
     if path.startswith("/static/") and not LOG_STATIC_VISITS:
         return False
@@ -643,32 +839,160 @@ def session_user_id(connection: psycopg.Connection, token: str) -> int | None:
     return int(row["user_id"]) if row else None
 
 
-def log_visit_event(request: Request, status_code: int, visitor_id: str) -> None:
+def upsert_visitor_session(
+    connection: psycopg.Connection,
+    request: Request,
+    visitor_id: str,
+    visitor_session_id: str,
+    user_id: int | None,
+    session_token_digest: str,
+    context: dict[str, str],
+) -> None:
+    now = utc_now()
+    is_api = context["path"].startswith("/api/")
+    page_view_increment = 0 if is_api else 1
+    api_hit_increment = 1 if is_api else 0
+    connection.execute(
+        """
+        INSERT INTO visitor_sessions (
+            session_id, visitor_id, user_id, session_token_hash, ip_address,
+            country, region, city, timezone, language, accept_language,
+            device_type, browser, os, user_agent, referrer,
+            landing_path, last_path, query_string,
+            utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+            started_at, last_seen_at, duration_seconds, page_views, api_hits, events
+        )
+        VALUES (
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, 0, %s, %s, 1
+        )
+        ON CONFLICT(session_id)
+        DO UPDATE SET
+            user_id = COALESCE(excluded.user_id, visitor_sessions.user_id),
+            session_token_hash = COALESCE(NULLIF(excluded.session_token_hash, ''), visitor_sessions.session_token_hash),
+            ip_address = excluded.ip_address,
+            country = COALESCE(NULLIF(excluded.country, ''), visitor_sessions.country),
+            region = COALESCE(NULLIF(excluded.region, ''), visitor_sessions.region),
+            city = COALESCE(NULLIF(excluded.city, ''), visitor_sessions.city),
+            timezone = COALESCE(NULLIF(excluded.timezone, ''), visitor_sessions.timezone),
+            language = COALESCE(NULLIF(excluded.language, ''), visitor_sessions.language),
+            accept_language = COALESCE(NULLIF(excluded.accept_language, ''), visitor_sessions.accept_language),
+            device_type = COALESCE(NULLIF(excluded.device_type, ''), visitor_sessions.device_type),
+            browser = COALESCE(NULLIF(excluded.browser, ''), visitor_sessions.browser),
+            os = COALESCE(NULLIF(excluded.os, ''), visitor_sessions.os),
+            user_agent = COALESCE(NULLIF(excluded.user_agent, ''), visitor_sessions.user_agent),
+            referrer = COALESCE(NULLIF(visitor_sessions.referrer, ''), excluded.referrer),
+            last_path = excluded.last_path,
+            query_string = excluded.query_string,
+            utm_source = COALESCE(NULLIF(visitor_sessions.utm_source, ''), excluded.utm_source),
+            utm_medium = COALESCE(NULLIF(visitor_sessions.utm_medium, ''), excluded.utm_medium),
+            utm_campaign = COALESCE(NULLIF(visitor_sessions.utm_campaign, ''), excluded.utm_campaign),
+            utm_term = COALESCE(NULLIF(visitor_sessions.utm_term, ''), excluded.utm_term),
+            utm_content = COALESCE(NULLIF(visitor_sessions.utm_content, ''), excluded.utm_content),
+            last_seen_at = excluded.last_seen_at,
+            duration_seconds = GREATEST(
+                visitor_sessions.duration_seconds,
+                EXTRACT(EPOCH FROM (excluded.last_seen_at::timestamptz - visitor_sessions.started_at::timestamptz))::int
+            ),
+            page_views = visitor_sessions.page_views + %s,
+            api_hits = visitor_sessions.api_hits + %s,
+            events = visitor_sessions.events + 1
+        """,
+        (
+            visitor_session_id,
+            visitor_id,
+            user_id,
+            session_token_digest,
+            client_ip(request),
+            context["country"],
+            context["region"],
+            context["city"],
+            context["timezone"],
+            context["language"],
+            context["accept_language"],
+            context["device_type"],
+            context["browser"],
+            context["os"],
+            context["user_agent"],
+            context["referrer"],
+            context["path"],
+            context["path"],
+            context["query_string"],
+            context["utm_source"],
+            context["utm_medium"],
+            context["utm_campaign"],
+            context["utm_term"],
+            context["utm_content"],
+            now,
+            now,
+            page_view_increment,
+            api_hit_increment,
+            page_view_increment,
+            api_hit_increment,
+        ),
+    )
+
+
+def log_visit_event(
+    request: Request,
+    status_code: int,
+    visitor_id: str,
+    visitor_session_id: str,
+) -> None:
     if not should_log_visit(request):
         return
     token = bearer_token(request)
     try:
         with DB_LOCK, db_connect() as connection:
             user_id = session_user_id(connection, token)
+            digest = token_hash(token)
+            context = visitor_context(request)
+            upsert_visitor_session(
+                connection,
+                request,
+                visitor_id,
+                visitor_session_id,
+                user_id,
+                digest,
+                context,
+            )
             connection.execute(
                 """
                 INSERT INTO visitor_events (
-                    visitor_id, user_id, session_token_hash, ip_address, method,
-                    path, query_string, status_code, referrer, user_agent, created_at
+                    visitor_id, session_id, user_id, session_token_hash, ip_address,
+                    country, region, city, timezone, language, device_type, browser, os,
+                    method, path, query_string, status_code, referrer, user_agent, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s
+                )
                 """,
                 (
                     visitor_id,
+                    visitor_session_id,
                     user_id,
-                    token_hash(token),
+                    digest,
                     client_ip(request),
+                    context["country"],
+                    context["region"],
+                    context["city"],
+                    context["timezone"],
+                    context["language"],
+                    context["device_type"],
+                    context["browser"],
+                    context["os"],
                     request.method,
-                    clamp_log_value(request.url.path, 800),
-                    redacted_query_string(request),
+                    context["path"],
+                    context["query_string"],
                     int(status_code or 0),
-                    request_referrer(request),
-                    request_user_agent(request),
+                    context["referrer"],
+                    context["user_agent"],
                     utc_now(),
                 ),
             )
@@ -706,6 +1030,56 @@ def log_activity(
             connection.commit()
     except Exception as exc:
         print(f"Aegis activity logging failed: {exc}")
+
+
+def update_visitor_heartbeat(request: Request, payload: VisitorHeartbeatRequest) -> None:
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip()
+    if not visitor_session_id:
+        return
+    now = utc_now()
+    clean_path = clamp_log_value(payload.path or request.url.path, 800)
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            UPDATE visitor_sessions
+            SET
+                last_seen_at = %s,
+                last_path = %s,
+                duration_seconds = GREATEST(duration_seconds, %s),
+                heartbeat_count = heartbeat_count + 1
+            WHERE session_id = %s
+            """,
+            (now, clean_path, int(payload.duration_seconds or 0), visitor_session_id),
+        )
+        connection.commit()
+
+
+def mark_visitor_preorder_conversion(request: Request, user_id: int) -> None:
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip()
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME, "").strip()
+    try:
+        with DB_LOCK, db_connect() as connection:
+            if visitor_session_id:
+                connection.execute(
+                    """
+                    UPDATE visitor_sessions
+                    SET converted_preorder = 1, user_id = %s, last_seen_at = %s
+                    WHERE session_id = %s
+                    """,
+                    (user_id, utc_now(), visitor_session_id),
+                )
+            if visitor_id:
+                connection.execute(
+                    """
+                    UPDATE visitor_sessions
+                    SET converted_preorder = 1, user_id = COALESCE(user_id, %s)
+                    WHERE visitor_id = %s
+                    """,
+                    (user_id, visitor_id),
+                )
+            connection.commit()
+    except Exception as exc:
+        print(f"Aegis preorder conversion tracking failed: {exc}")
 
 
 def create_local_user(username: str, password: str, plan: str) -> tuple[str, dict[str, Any]]:
@@ -1065,6 +1439,12 @@ ADMIN_VISITOR_WINDOWS: dict[str, str] = {
     "month": "created_at::timestamptz >= now() - interval '30 days'",
     "all": "TRUE",
 }
+ADMIN_SESSION_WINDOWS: dict[str, str] = {
+    "day": "last_seen_at::timestamptz >= now() - interval '1 day'",
+    "week": "last_seen_at::timestamptz >= now() - interval '7 days'",
+    "month": "last_seen_at::timestamptz >= now() - interval '30 days'",
+    "all": "TRUE",
+}
 
 
 def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]:
@@ -1109,6 +1489,7 @@ def preorder_aegis(user_id: int) -> dict[str, Any]:
 def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
     insights: dict[str, Any] = {}
     for window_id, where_clause in ADMIN_VISITOR_WINDOWS.items():
+        session_clause = ADMIN_SESSION_WINDOWS[window_id]
         visit_stats = connection.execute(
             f"""
             SELECT
@@ -1123,6 +1504,23 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE path LIKE '/api/%')::int AS api_hits
             FROM visitor_events
             WHERE {where_clause}
+            """
+        ).fetchone()
+        session_stats = connection.execute(
+            f"""
+            SELECT
+                COUNT(*)::int AS sessions,
+                COUNT(*) FILTER (WHERE user_id IS NULL)::int AS external_sessions,
+                COUNT(DISTINCT visitor_id)::int AS session_visitors,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
+                COALESCE(ROUND(AVG(page_views))::int, 0) AS avg_page_views,
+                COALESCE(SUM(page_views), 0)::int AS page_views,
+                COUNT(*) FILTER (WHERE duration_seconds >= 30 OR page_views > 1)::int AS engaged_sessions,
+                COUNT(*) FILTER (WHERE page_views <= 1 AND duration_seconds < 15)::int AS bounce_sessions,
+                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions
+            FROM visitor_sessions
+            WHERE {session_clause}
             """
         ).fetchone()
         activity_stats = connection.execute(
@@ -1142,21 +1540,102 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             SELECT
                 visitor_id,
                 MAX(user_id) AS user_id,
-                COUNT(*)::int AS visits,
+                COUNT(*)::int AS sessions,
                 COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
-                COUNT(*) FILTER (WHERE status_code >= 400)::int AS errors,
-                COUNT(*) FILTER (WHERE path LIKE '/api/%')::int AS api_hits,
-                MIN(created_at) AS first_seen_at,
-                MAX(created_at) AS last_seen_at,
-                (ARRAY_AGG(ip_address ORDER BY created_at DESC))[1] AS last_ip,
-                (ARRAY_AGG(path ORDER BY created_at DESC))[1] AS last_path,
-                (ARRAY_AGG(referrer ORDER BY created_at DESC))[1] AS last_referrer,
-                (ARRAY_AGG(user_agent ORDER BY created_at DESC))[1] AS last_user_agent
-            FROM visitor_events
-            WHERE {where_clause}
+                COALESCE(SUM(page_views), 0)::int AS page_views,
+                COALESCE(SUM(api_hits), 0)::int AS api_hits,
+                COALESCE(SUM(events), 0)::int AS events,
+                COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                MAX(converted_preorder)::int AS converted_preorder,
+                MIN(started_at) AS first_seen_at,
+                MAX(last_seen_at) AS last_seen_at,
+                (ARRAY_AGG(ip_address ORDER BY last_seen_at DESC))[1] AS last_ip,
+                (ARRAY_AGG(country ORDER BY last_seen_at DESC))[1] AS country,
+                (ARRAY_AGG(region ORDER BY last_seen_at DESC))[1] AS region,
+                (ARRAY_AGG(city ORDER BY last_seen_at DESC))[1] AS city,
+                (ARRAY_AGG(language ORDER BY last_seen_at DESC))[1] AS language,
+                (ARRAY_AGG(device_type ORDER BY last_seen_at DESC))[1] AS device_type,
+                (ARRAY_AGG(browser ORDER BY last_seen_at DESC))[1] AS browser,
+                (ARRAY_AGG(os ORDER BY last_seen_at DESC))[1] AS os,
+                (ARRAY_AGG(utm_source ORDER BY last_seen_at DESC))[1] AS utm_source,
+                (ARRAY_AGG(utm_medium ORDER BY last_seen_at DESC))[1] AS utm_medium,
+                (ARRAY_AGG(utm_campaign ORDER BY last_seen_at DESC))[1] AS utm_campaign,
+                (ARRAY_AGG(referrer ORDER BY last_seen_at DESC))[1] AS last_referrer,
+                (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS landing_path,
+                (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path,
+                (ARRAY_AGG(user_agent ORDER BY last_seen_at DESC))[1] AS last_user_agent
+            FROM visitor_sessions
+            WHERE {session_clause}
             GROUP BY visitor_id
             ORDER BY last_seen_at DESC
             LIMIT 100
+            """
+        ).fetchall()
+        session_rows = connection.execute(
+            f"""
+            SELECT
+                session_id, visitor_id, user_id, ip_address, country, region, city,
+                timezone, language, device_type, browser, os, referrer, landing_path,
+                last_path, utm_source, utm_medium, utm_campaign, started_at, last_seen_at,
+                duration_seconds, page_views, api_hits, events, heartbeat_count,
+                converted_preorder
+            FROM visitor_sessions
+            WHERE {session_clause}
+            ORDER BY last_seen_at DESC
+            LIMIT 120
+            """
+        ).fetchall()
+        geo_rows = connection.execute(
+            f"""
+            SELECT
+                COALESCE(NULLIF(country, ''), 'unknown') AS country,
+                COALESCE(NULLIF(region, ''), 'unknown') AS region,
+                COALESCE(NULLIF(city, ''), 'unknown') AS city,
+                COUNT(*)::int AS sessions,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                COALESCE(SUM(page_views), 0)::int AS page_views,
+                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
+            FROM visitor_sessions
+            WHERE {session_clause}
+            GROUP BY 1, 2, 3
+            ORDER BY sessions DESC, visitors DESC
+            LIMIT 24
+            """
+        ).fetchall()
+        device_rows = connection.execute(
+            f"""
+            SELECT
+                COALESCE(NULLIF(device_type, ''), 'unknown') AS device_type,
+                COALESCE(NULLIF(browser, ''), 'unknown') AS browser,
+                COALESCE(NULLIF(os, ''), 'unknown') AS os,
+                COUNT(*)::int AS sessions,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds
+            FROM visitor_sessions
+            WHERE {session_clause}
+            GROUP BY 1, 2, 3
+            ORDER BY sessions DESC
+            LIMIT 24
+            """
+        ).fetchall()
+        campaign_rows = connection.execute(
+            f"""
+            SELECT
+                COALESCE(NULLIF(utm_source, ''), 'direct') AS source,
+                COALESCE(NULLIF(utm_medium, ''), 'none') AS medium,
+                COALESCE(NULLIF(utm_campaign, ''), 'none') AS campaign,
+                COUNT(*)::int AS sessions,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                COALESCE(SUM(page_views), 0)::int AS page_views,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
+            FROM visitor_sessions
+            WHERE {session_clause}
+            GROUP BY 1, 2, 3
+            ORDER BY sessions DESC, conversions DESC
+            LIMIT 24
             """
         ).fetchall()
         top_paths = connection.execute(
@@ -1210,8 +1689,13 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
         ).fetchall()
         insights[window_id] = {
             "stats": row_to_dict(visit_stats),
+            "session_stats": row_to_dict(session_stats),
             "activity_stats": row_to_dict(activity_stats),
             "visitors": [row_to_dict(row) for row in visitors],
+            "sessions": [row_to_dict(row) for row in session_rows],
+            "geo": [row_to_dict(row) for row in geo_rows],
+            "devices": [row_to_dict(row) for row in device_rows],
+            "campaigns": [row_to_dict(row) for row in campaign_rows],
             "top_paths": [row_to_dict(row) for row in top_paths],
             "top_referrers": [row_to_dict(row) for row in top_referrers],
             "recent_visits": [row_to_dict(row) for row in recent_visits],
@@ -1289,7 +1773,8 @@ def admin_dashboard_payload() -> dict[str, Any]:
         visit_rows = connection.execute(
             """
             SELECT
-                id, visitor_id, user_id, ip_address, method, path, query_string,
+                id, visitor_id, session_id, user_id, ip_address, country, region, city,
+                language, device_type, browser, os, method, path, query_string,
                 status_code, referrer, user_agent, created_at
             FROM visitor_events
             ORDER BY created_at DESC
@@ -1316,6 +1801,8 @@ def admin_dashboard_payload() -> dict[str, Any]:
                 (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
                 (SELECT COUNT(*) FROM visitor_events) AS visits,
                 (SELECT COUNT(DISTINCT visitor_id) FROM visitor_events) AS unique_visitors,
+                (SELECT COUNT(*) FROM visitor_sessions) AS visitor_sessions,
+                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions) AS avg_session_seconds,
                 (SELECT COUNT(*) FROM activity_logs) AS activity_logs
             """,
             (now,),
@@ -1344,20 +1831,30 @@ init_db()
 @app.middleware("http")
 async def capture_visit_events(request: Request, call_next):
     visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or secrets.token_urlsafe(18)
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME) or secrets.token_urlsafe(18)
     should_set_cookie = VISITOR_COOKIE_NAME not in request.cookies
+    should_set_session_cookie = VISITOR_SESSION_COOKIE_NAME not in request.cookies
     status_code = 500
     try:
         response = await call_next(request)
         status_code = response.status_code
     except Exception:
-        log_visit_event(request, status_code, visitor_id)
+        log_visit_event(request, status_code, visitor_id, visitor_session_id)
         raise
-    log_visit_event(request, status_code, visitor_id)
+    log_visit_event(request, status_code, visitor_id, visitor_session_id)
     if should_set_cookie:
         response.set_cookie(
             VISITOR_COOKIE_NAME,
             visitor_id,
             max_age=60 * 60 * 24 * 365,
+            httponly=True,
+            secure=request_is_secure(request),
+            samesite="lax",
+        )
+    if should_set_session_cookie:
+        response.set_cookie(
+            VISITOR_SESSION_COOKIE_NAME,
+            visitor_session_id,
             httponly=True,
             secure=request_is_secure(request),
             samesite="lax",
@@ -1373,6 +1870,12 @@ def index() -> FileResponse:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/visitor/heartbeat")
+def api_visitor_heartbeat(request: Request, payload: VisitorHeartbeatRequest) -> dict[str, bool]:
+    update_visitor_heartbeat(request, payload)
+    return {"ok": True}
 
 
 @app.get("/api/config")
@@ -1547,6 +2050,7 @@ def api_account_runs(request: Request, limit: int = 8) -> dict[str, Any]:
 def api_account_aegis_preorder(request: Request) -> dict[str, Any]:
     user = require_user(request)
     updated_user = preorder_aegis(int(user["id"]))
+    mark_visitor_preorder_conversion(request, int(user["id"]))
     log_activity(
         "account",
         "aegis_preorder",

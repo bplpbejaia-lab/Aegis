@@ -41,6 +41,10 @@ const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
 const adminTopPaths = document.querySelector("#admin-top-paths");
 const adminReferrers = document.querySelector("#admin-referrers");
+const adminGeo = document.querySelector("#admin-geo");
+const adminDevices = document.querySelector("#admin-devices");
+const adminCampaigns = document.querySelector("#admin-campaigns");
+const adminSessions = document.querySelector("#admin-sessions");
 const adminVisitEvents = document.querySelector("#admin-visit-events");
 const adminActivityLogs = document.querySelector("#admin-activity-logs");
 const adminPeriodTabs = document.querySelectorAll("[data-admin-period]");
@@ -94,6 +98,7 @@ const thinkingStages = document.querySelector("#thinking-stages");
 
 const traceItems = new Map();
 const SESSION_KEY = "aegisSessionToken";
+const VISITOR_HEARTBEAT_MS = 20000;
 const ADMIN_PERIOD_LABELS = {
   day: "Rolling 24h",
   week: "Last 7 days",
@@ -113,6 +118,8 @@ let googleButtonRendered = false;
 let googleInitTimer = null;
 let adminDashboardData = null;
 let adminSelectedPeriod = "day";
+let visitorStartedAt = Date.now();
+let visitorHeartbeatTimer = null;
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -129,6 +136,7 @@ async function initializeApp() {
   await loadConfig();
   await restoreSession();
   initializeGoogleSignIn();
+  startVisitorHeartbeat();
   installLocalPreviewHook();
 }
 
@@ -320,6 +328,14 @@ document.addEventListener("click", (event) => {
   focusTargetInput();
 });
 
+document.addEventListener("visibilitychange", () => {
+  sendVisitorHeartbeat({ visible: !document.hidden, keepalive: true });
+});
+
+window.addEventListener("pagehide", () => {
+  sendVisitorHeartbeat({ visible: false, keepalive: true });
+});
+
 reportSearchInput?.addEventListener("input", () => {
   filterReport(reportSearchInput.value);
 });
@@ -383,6 +399,29 @@ async function apiJson(path, options = {}) {
     throw new Error(data.detail || data.message || `HTTP ${response.status}`);
   }
   return data;
+}
+
+function startVisitorHeartbeat() {
+  if (visitorHeartbeatTimer) window.clearInterval(visitorHeartbeatTimer);
+  sendVisitorHeartbeat({ visible: !document.hidden });
+  visitorHeartbeatTimer = window.setInterval(() => {
+    sendVisitorHeartbeat({ visible: !document.hidden });
+  }, VISITOR_HEARTBEAT_MS);
+}
+
+function sendVisitorHeartbeat({ visible = true, keepalive = false } = {}) {
+  const payload = {
+    path: `${window.location.pathname}${window.location.search}`,
+    title: document.title || "",
+    visible,
+    duration_seconds: Math.max(0, Math.round((Date.now() - visitorStartedAt) / 1000)),
+  };
+  fetch("/api/visitor/heartbeat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    keepalive,
+  }).catch(() => {});
 }
 
 function switchAuthTab(tabName) {
@@ -833,6 +872,10 @@ function setAdminLoading() {
   if (adminVisitors) adminVisitors.innerHTML = "";
   if (adminTopPaths) adminTopPaths.innerHTML = "";
   if (adminReferrers) adminReferrers.innerHTML = "";
+  if (adminGeo) adminGeo.innerHTML = "";
+  if (adminDevices) adminDevices.innerHTML = "";
+  if (adminCampaigns) adminCampaigns.innerHTML = "";
+  if (adminSessions) adminSessions.innerHTML = "";
   if (adminVisitEvents) adminVisitEvents.innerHTML = "";
   if (adminActivityLogs) adminActivityLogs.innerHTML = "";
 }
@@ -842,6 +885,7 @@ function renderAdminDashboard(data) {
   const dashboard = adminDashboardData || {};
   const insights = selectedAdminInsights(dashboard);
   const stats = insights.stats || {};
+  const sessionStats = insights.session_stats || {};
   const activityStats = insights.activity_stats || {};
   const summary = dashboard.summary || {};
   const externalVisitors = (insights.visitors || []).filter((visitor) => !visitor.user_id);
@@ -852,8 +896,12 @@ function renderAdminDashboard(data) {
       ["Active sessions", summary.active_sessions || 0],
       ["Pre-regs", summary.preorders || 0],
       ["External visitors", stats.external_visitors || 0],
+      ["Sessions", sessionStats.sessions || 0],
       ["Visits", stats.visits || 0],
       ["Unique IPs", stats.unique_ips || 0],
+      ["Avg time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
+      ["Engaged", sessionStats.engaged_sessions || 0],
+      ["Conversions", sessionStats.preorder_conversions || 0],
       ["API hits", stats.api_hits || 0],
       ["Activity logs", activityStats.logs || 0],
       ["Errors", stats.error_hits || summary.problem_runs || 0],
@@ -929,13 +977,14 @@ function renderAdminDashboard(data) {
   renderAdminTable(
     adminVisitors,
     externalVisitors,
-    ["Visitor", "Visits", "IPs", "API", "Errors", "Last path", "Seen"],
+    ["Visitor", "Region", "Device", "Source", "Pages", "Time", "Last path", "Seen"],
     (visitor) => [
       shortVisitorId(visitor.visitor_id),
-      visitor.visits || 0,
-      visitor.unique_ips || 0,
-      visitor.api_hits || 0,
-      visitor.errors || 0,
+      visitorRegion(visitor),
+      visitorDevice(visitor),
+      visitorSource(visitor),
+      visitor.page_views || 0,
+      formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000),
       compactPath(visitor.last_path),
       relativeTime(visitor.last_seen_at),
     ],
@@ -967,12 +1016,76 @@ function renderAdminDashboard(data) {
     "No external referrers in this period.",
   );
   renderAdminTable(
+    adminGeo,
+    insights.geo || [],
+    ["Region", "Sessions", "Visitors", "Pages", "Avg time", "Conv."],
+    (geo) => [
+      [geo.country, geo.region, geo.city].filter(Boolean).join(" / "),
+      geo.sessions || 0,
+      geo.visitors || 0,
+      geo.page_views || 0,
+      formatDuration((geo.avg_duration_seconds || 0) * 1000),
+      geo.conversions || 0,
+    ],
+    "No regional data in this period.",
+  );
+  renderAdminTable(
+    adminDevices,
+    insights.devices || [],
+    ["Device", "Browser", "OS", "Sessions", "Visitors", "Avg time"],
+    (device) => [
+      device.device_type || "unknown",
+      device.browser || "unknown",
+      device.os || "unknown",
+      device.sessions || 0,
+      device.visitors || 0,
+      formatDuration((device.avg_duration_seconds || 0) * 1000),
+    ],
+    "No device data in this period.",
+  );
+  renderAdminTable(
+    adminCampaigns,
+    insights.campaigns || [],
+    ["Source", "Medium", "Campaign", "Sessions", "Visitors", "Pages", "Avg time", "Conv."],
+    (campaign) => [
+      campaign.source || "direct",
+      campaign.medium || "none",
+      campaign.campaign || "none",
+      campaign.sessions || 0,
+      campaign.visitors || 0,
+      campaign.page_views || 0,
+      formatDuration((campaign.avg_duration_seconds || 0) * 1000),
+      campaign.conversions || 0,
+    ],
+    "No campaign data in this period.",
+  );
+  renderAdminTable(
+    adminSessions,
+    insights.sessions || [],
+    ["Seen", "Visitor", "Region", "Device", "Landing", "Last page", "Pages", "Time", "Source", "Conv."],
+    (session) => [
+      relativeTime(session.last_seen_at),
+      shortVisitorId(session.visitor_id),
+      visitorRegion(session),
+      visitorDevice(session),
+      compactPath(session.landing_path),
+      compactPath(session.last_path),
+      session.page_views || 0,
+      formatDuration((session.duration_seconds || 0) * 1000),
+      visitorSource(session),
+      Number(session.converted_preorder || 0) ? "yes" : "no",
+    ],
+    "No visitor sessions in this period.",
+  );
+  renderAdminTable(
     adminVisitEvents,
     insights.recent_visits || [],
-    ["When", "Visitor", "User", "IP", "Method", "Path", "Status", "Referrer"],
+    ["When", "Visitor", "Region", "Device", "User", "IP", "Method", "Path", "Status", "Referrer"],
     (visit) => [
       relativeTime(visit.created_at),
       shortVisitorId(visit.visitor_id),
+      visitorRegion(visit),
+      visitorDevice(visit),
       visit.user_id ? `user #${visit.user_id}` : "external",
       visit.ip_address || "n/a",
       visit.method || "GET",
@@ -1027,8 +1140,13 @@ function selectedAdminInsights(data) {
   const insights = data?.visitor_insights || {};
   return insights[adminSelectedPeriod] || insights.day || {
     stats: {},
+    session_stats: {},
     activity_stats: {},
     visitors: [],
+    sessions: [],
+    geo: [],
+    devices: [],
+    campaigns: [],
     top_paths: [],
     top_referrers: [],
     recent_visits: data?.visits || [],
@@ -1066,6 +1184,28 @@ function compactReferrer(value) {
   } catch {
     return text.length > 72 ? `${text.slice(0, 69)}...` : text;
   }
+}
+
+function visitorRegion(value) {
+  const parts = [value?.country, value?.region, value?.city].filter(Boolean);
+  return parts.length ? parts.join(" / ") : "unknown";
+}
+
+function visitorDevice(value) {
+  const device = value?.device_type || "unknown";
+  const browser = value?.browser || "unknown";
+  const os = value?.os || "unknown";
+  return `${device} / ${browser} / ${os}`;
+}
+
+function visitorSource(value) {
+  const source = value?.utm_source || "";
+  const medium = value?.utm_medium || "";
+  const campaign = value?.utm_campaign || "";
+  if (source || medium || campaign) {
+    return [source || "direct", medium || "none", campaign || "none"].join(" / ");
+  }
+  return compactReferrer(value?.last_referrer || value?.referrer || "");
 }
 
 function pathWithQuery(visit) {
