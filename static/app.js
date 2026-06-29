@@ -37,6 +37,13 @@ const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
 const adminUsers = document.querySelector("#admin-users");
 const adminRuns = document.querySelector("#admin-runs");
+const adminVisitors = document.querySelector("#admin-visitors");
+const adminTopPaths = document.querySelector("#admin-top-paths");
+const adminReferrers = document.querySelector("#admin-referrers");
+const adminVisitEvents = document.querySelector("#admin-visit-events");
+const adminActivityLogs = document.querySelector("#admin-activity-logs");
+const adminPeriodTabs = document.querySelectorAll("[data-admin-period]");
+const adminPeriodNote = document.querySelector("#admin-period-note");
 const authMessage = document.querySelector("#auth-message");
 const logoutButton = document.querySelector("#logout-button");
 const sessionButton = document.querySelector("#session-button");
@@ -86,6 +93,12 @@ const thinkingStages = document.querySelector("#thinking-stages");
 
 const traceItems = new Map();
 const SESSION_KEY = "aegisSessionToken";
+const ADMIN_PERIOD_LABELS = {
+  day: "Rolling 24h",
+  week: "Last 7 days",
+  month: "Last 30 days",
+  all: "All time",
+};
 let runStartedAt = 0;
 let timer = null;
 let currentReport = null;
@@ -97,6 +110,8 @@ let isStoppingRun = false;
 let currentQuotaSummary = null;
 let googleButtonRendered = false;
 let googleInitTimer = null;
+let adminDashboardData = null;
+let adminSelectedPeriod = "day";
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -210,6 +225,13 @@ accountPlanInput?.addEventListener("change", async () => {
 
 refreshAdminDashboardButton?.addEventListener("click", () => {
   loadAdminDashboard();
+});
+
+adminPeriodTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    adminSelectedPeriod = tab.dataset.adminPeriod || "day";
+    renderAdminDashboard(adminDashboardData || {});
+  });
 });
 
 logoutButton?.addEventListener("click", async () => {
@@ -806,17 +828,32 @@ function setAdminLoading() {
   if (adminLiveRuns) adminLiveRuns.innerHTML = "";
   if (adminUsers) adminUsers.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
+  if (adminVisitors) adminVisitors.innerHTML = "";
+  if (adminTopPaths) adminTopPaths.innerHTML = "";
+  if (adminReferrers) adminReferrers.innerHTML = "";
+  if (adminVisitEvents) adminVisitEvents.innerHTML = "";
+  if (adminActivityLogs) adminActivityLogs.innerHTML = "";
 }
 
 function renderAdminDashboard(data) {
-  const summary = data.summary || {};
+  adminDashboardData = data || adminDashboardData || {};
+  const dashboard = adminDashboardData || {};
+  const insights = selectedAdminInsights(dashboard);
+  const stats = insights.stats || {};
+  const activityStats = insights.activity_stats || {};
+  const summary = dashboard.summary || {};
+  const externalVisitors = (insights.visitors || []).filter((visitor) => !visitor.user_id);
+  renderAdminPeriodTabs();
   if (adminSummary) {
     adminSummary.innerHTML = [
       ["Users", summary.users || 0],
       ["Active sessions", summary.active_sessions || 0],
-      ["Live runs", summary.live_runs || 0],
-      ["Completed", summary.completed_runs || 0],
-      ["Problems", summary.problem_runs || 0],
+      ["External visitors", stats.external_visitors || 0],
+      ["Visits", stats.visits || 0],
+      ["Unique IPs", stats.unique_ips || 0],
+      ["API hits", stats.api_hits || 0],
+      ["Activity logs", activityStats.logs || 0],
+      ["Errors", stats.error_hits || summary.problem_runs || 0],
     ]
       .map(
         ([label, value]) => `
@@ -830,7 +867,7 @@ function renderAdminDashboard(data) {
   }
   renderAdminTable(
     adminLiveRuns,
-    data.live_runs || [],
+    dashboard.live_runs || [],
     ["User", "Target", "Engine", "Status", "Updated"],
     (run) => [
       run.username,
@@ -843,7 +880,7 @@ function renderAdminDashboard(data) {
   );
   renderAdminTable(
     adminUsers,
-    data.users || [],
+    dashboard.users || [],
     ["User", "Plan", "Provider", "Sessions", "Runs", "Seen"],
     (user) => [
       user.username,
@@ -857,7 +894,7 @@ function renderAdminDashboard(data) {
   );
   renderAdminTable(
     adminRuns,
-    data.recent_runs || [],
+    dashboard.recent_runs || [],
     ["When", "User", "Target", "Engine", "Mode", "Status", "Score", "Duration"],
     (run) => [
       relativeTime(run.started_at),
@@ -871,10 +908,81 @@ function renderAdminDashboard(data) {
     ],
     "No run history yet.",
   );
+  renderAdminTable(
+    adminVisitors,
+    externalVisitors,
+    ["Visitor", "Visits", "IPs", "API", "Errors", "Last path", "Seen"],
+    (visitor) => [
+      shortVisitorId(visitor.visitor_id),
+      visitor.visits || 0,
+      visitor.unique_ips || 0,
+      visitor.api_hits || 0,
+      visitor.errors || 0,
+      compactPath(visitor.last_path),
+      relativeTime(visitor.last_seen_at),
+    ],
+    "No visitors in this period.",
+  );
+  renderAdminTable(
+    adminTopPaths,
+    insights.top_paths || [],
+    ["Path", "Hits", "Visitors", "Errors", "Seen"],
+    (route) => [
+      compactPath(route.path),
+      route.hits || 0,
+      route.visitors || 0,
+      route.errors || 0,
+      relativeTime(route.last_seen_at),
+    ],
+    "No route activity in this period.",
+  );
+  renderAdminTable(
+    adminReferrers,
+    insights.top_referrers || [],
+    ["Source", "Hits", "Visitors", "Seen"],
+    (source) => [
+      compactReferrer(source.referrer),
+      source.hits || 0,
+      source.visitors || 0,
+      relativeTime(source.last_seen_at),
+    ],
+    "No external referrers in this period.",
+  );
+  renderAdminTable(
+    adminVisitEvents,
+    insights.recent_visits || [],
+    ["When", "Visitor", "User", "IP", "Method", "Path", "Status", "Referrer"],
+    (visit) => [
+      relativeTime(visit.created_at),
+      shortVisitorId(visit.visitor_id),
+      visit.user_id ? `user #${visit.user_id}` : "external",
+      visit.ip_address || "n/a",
+      visit.method || "GET",
+      pathWithQuery(visit),
+      visit.status_code || 0,
+      compactReferrer(visit.referrer),
+    ],
+    "No visit events in this period.",
+  );
+  renderAdminTable(
+    adminActivityLogs,
+    insights.activity || [],
+    ["When", "User", "Type", "Action", "IP", "Data"],
+    (entry) => [
+      relativeTime(entry.created_at),
+      entry.user_id ? `user #${entry.user_id}` : "system",
+      entry.category || "log",
+      entry.action || "event",
+      entry.ip_address || "n/a",
+      metadataPreview(entry.metadata),
+    ],
+    "No activity logs in this period.",
+  );
 }
 
 function renderAdminTable(container, rows, headings, rowMapper, emptyText) {
   if (!container) return;
+  rows = Array.isArray(rows) ? rows : [];
   if (!rows.length) {
     container.innerHTML = `<p class="admin-empty">${escapeHtml(emptyText)}</p>`;
     return;
@@ -895,6 +1003,67 @@ function renderAdminTable(container, rows, headings, rowMapper, emptyText) {
       </tbody>
     </table>
   `;
+}
+
+function selectedAdminInsights(data) {
+  const insights = data?.visitor_insights || {};
+  return insights[adminSelectedPeriod] || insights.day || {
+    stats: {},
+    activity_stats: {},
+    visitors: [],
+    top_paths: [],
+    top_referrers: [],
+    recent_visits: data?.visits || [],
+    activity: data?.activity || [],
+  };
+}
+
+function renderAdminPeriodTabs() {
+  adminPeriodTabs.forEach((tab) => {
+    const isActive = tab.dataset.adminPeriod === adminSelectedPeriod;
+    tab.classList.toggle("is-active", isActive);
+    tab.setAttribute("aria-selected", String(isActive));
+  });
+  if (adminPeriodNote) {
+    adminPeriodNote.textContent = ADMIN_PERIOD_LABELS[adminSelectedPeriod] || "Filtered";
+  }
+}
+
+function shortVisitorId(value) {
+  const text = String(value || "unknown");
+  return text.length > 14 ? `${text.slice(0, 10)}...` : text;
+}
+
+function compactPath(value) {
+  const text = String(value || "/");
+  return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+}
+
+function compactReferrer(value) {
+  const text = String(value || "");
+  if (!text) return "direct";
+  try {
+    const url = new URL(text);
+    return `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`;
+  } catch {
+    return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+  }
+}
+
+function pathWithQuery(visit) {
+  const query = String(visit.query_string || "");
+  const path = String(visit.path || "/");
+  return compactPath(query ? `${path}?${query}` : path);
+}
+
+function metadataPreview(metadata) {
+  if (!metadata) return "";
+  if (typeof metadata === "string") return compactPath(metadata);
+  try {
+    return compactPath(JSON.stringify(metadata));
+  } catch {
+    return compactPath(String(metadata));
+  }
 }
 
 function compactUrl(value) {

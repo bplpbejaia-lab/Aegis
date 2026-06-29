@@ -2076,8 +2076,52 @@ button:disabled {
 
 .admin-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
+}
+
+.admin-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 10px;
+}
+
+.admin-period-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(4, minmax(54px, 1fr));
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a0a0a;
+  padding: 4px;
+}
+
+.admin-period-tabs button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.admin-period-tabs button.is-active {
+  background: var(--accent);
+  color: #041107;
+}
+
+#admin-period-note {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .admin-stat,
@@ -2133,6 +2177,10 @@ button:disabled {
   max-height: 280px;
   overflow: auto;
   margin-top: 10px;
+}
+
+.admin-table-compact {
+  max-height: 340px;
 }
 
 .admin-table table {
@@ -3018,6 +3066,7 @@ button:disabled {
   .input-frame,
   .capability-grid,
   .account-panel,
+  .admin-controls,
   .thinking-dialog,
   .thinking-stats,
   .thinking-stages,
@@ -3047,6 +3096,15 @@ button:disabled {
     inset: -56px auto auto -56px;
     width: 124px;
     height: 124px;
+  }
+
+  .admin-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-period-tabs {
+    width: 100%;
   }
 
   .profile-avatar {

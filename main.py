@@ -1059,6 +1059,14 @@ def row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+ADMIN_VISITOR_WINDOWS: dict[str, str] = {
+    "day": "created_at::timestamptz >= now() - interval '1 day'",
+    "week": "created_at::timestamptz >= now() - interval '7 days'",
+    "month": "created_at::timestamptz >= now() - interval '30 days'",
+    "all": "TRUE",
+}
+
+
 def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]:
     run_limit = max(1, min(int(limit or 8), 20))
     query = """
@@ -1096,6 +1104,120 @@ def preorder_aegis(user_id: int) -> dict[str, Any]:
             connection.commit()
         updated = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     return serialize_user(updated)
+
+
+def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
+    insights: dict[str, Any] = {}
+    for window_id, where_clause in ADMIN_VISITOR_WINDOWS.items():
+        visit_stats = connection.execute(
+            f"""
+            SELECT
+                COUNT(*)::int AS visits,
+                COUNT(DISTINCT visitor_id)::int AS unique_visitors,
+                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NULL)::int AS external_visitors,
+                COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_visitors,
+                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
+                COUNT(*) FILTER (WHERE user_id IS NULL)::int AS anonymous_hits,
+                COUNT(*) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_hits,
+                COUNT(*) FILTER (WHERE status_code >= 400)::int AS error_hits,
+                COUNT(*) FILTER (WHERE path LIKE '/api/%')::int AS api_hits
+            FROM visitor_events
+            WHERE {where_clause}
+            """
+        ).fetchone()
+        activity_stats = connection.execute(
+            f"""
+            SELECT
+                COUNT(*)::int AS logs,
+                COUNT(*) FILTER (WHERE category = 'auth')::int AS auth_logs,
+                COUNT(*) FILTER (WHERE category = 'account')::int AS account_logs,
+                COUNT(*) FILTER (WHERE category = 'analysis')::int AS analysis_logs,
+                COUNT(DISTINCT user_id)::int AS active_users
+            FROM activity_logs
+            WHERE {where_clause}
+            """
+        ).fetchone()
+        visitors = connection.execute(
+            f"""
+            SELECT
+                visitor_id,
+                MAX(user_id) AS user_id,
+                COUNT(*)::int AS visits,
+                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
+                COUNT(*) FILTER (WHERE status_code >= 400)::int AS errors,
+                COUNT(*) FILTER (WHERE path LIKE '/api/%')::int AS api_hits,
+                MIN(created_at) AS first_seen_at,
+                MAX(created_at) AS last_seen_at,
+                (ARRAY_AGG(ip_address ORDER BY created_at DESC))[1] AS last_ip,
+                (ARRAY_AGG(path ORDER BY created_at DESC))[1] AS last_path,
+                (ARRAY_AGG(referrer ORDER BY created_at DESC))[1] AS last_referrer,
+                (ARRAY_AGG(user_agent ORDER BY created_at DESC))[1] AS last_user_agent
+            FROM visitor_events
+            WHERE {where_clause}
+            GROUP BY visitor_id
+            ORDER BY last_seen_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        top_paths = connection.execute(
+            f"""
+            SELECT
+                path,
+                COUNT(*)::int AS hits,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                COUNT(*) FILTER (WHERE status_code >= 400)::int AS errors,
+                MAX(created_at) AS last_seen_at
+            FROM visitor_events
+            WHERE {where_clause}
+            GROUP BY path
+            ORDER BY hits DESC, last_seen_at DESC
+            LIMIT 20
+            """
+        ).fetchall()
+        top_referrers = connection.execute(
+            f"""
+            SELECT
+                referrer,
+                COUNT(*)::int AS hits,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                MAX(created_at) AS last_seen_at
+            FROM visitor_events
+            WHERE {where_clause} AND referrer <> ''
+            GROUP BY referrer
+            ORDER BY hits DESC, last_seen_at DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        recent_visits = connection.execute(
+            f"""
+            SELECT
+                id, visitor_id, user_id, ip_address, method, path, query_string,
+                status_code, referrer, user_agent, created_at
+            FROM visitor_events
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT 120
+            """
+        ).fetchall()
+        recent_activity = connection.execute(
+            f"""
+            SELECT id, user_id, category, action, ip_address, user_agent, metadata, created_at
+            FROM activity_logs
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT 120
+            """
+        ).fetchall()
+        insights[window_id] = {
+            "stats": row_to_dict(visit_stats),
+            "activity_stats": row_to_dict(activity_stats),
+            "visitors": [row_to_dict(row) for row in visitors],
+            "top_paths": [row_to_dict(row) for row in top_paths],
+            "top_referrers": [row_to_dict(row) for row in top_referrers],
+            "recent_visits": [row_to_dict(row) for row in recent_visits],
+            "activity": [row_to_dict(row) for row in recent_activity],
+        }
+    return insights
 
 
 def admin_dashboard_payload() -> dict[str, Any]:
@@ -1186,6 +1308,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
             """,
             (now,),
         ).fetchone()
+        visitor_insights = admin_visitor_insights(connection)
 
     return {
         "summary": row_to_dict(summary),
@@ -1195,6 +1318,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
         "usage": [row_to_dict(row) for row in usage_rows],
         "visits": [row_to_dict(row) for row in visit_rows],
         "activity": [row_to_dict(row) for row in activity_rows],
+        "visitor_insights": visitor_insights,
         "generated_at": now,
     }
 

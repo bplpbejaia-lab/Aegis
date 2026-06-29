@@ -321,6 +321,15 @@
             <button type="button" id="refresh-admin-dashboard">Refresh</button>
           </div>
           <div id="admin-summary" class="admin-summary"></div>
+          <div class="admin-controls" aria-label="Admin reporting filters">
+            <div class="admin-period-tabs" role="tablist" aria-label="Reporting period">
+              <button type="button" class="is-active" data-admin-period="day">24h</button>
+              <button type="button" data-admin-period="week">7d</button>
+              <button type="button" data-admin-period="month">30d</button>
+              <button type="button" data-admin-period="all">All</button>
+            </div>
+            <span id="admin-period-note">Rolling 24h</span>
+          </div>
           <div class="admin-grid">
             <article>
               <div class="admin-section-heading">
@@ -335,6 +344,41 @@
                 <span>sessions / plans</span>
               </div>
               <div id="admin-users" class="admin-table"></div>
+            </article>
+            <article>
+              <div class="admin-section-heading">
+                <h4>External visitors</h4>
+                <span>grouped visitors</span>
+              </div>
+              <div id="admin-visitors" class="admin-table"></div>
+            </article>
+            <article>
+              <div class="admin-section-heading">
+                <h4>Top routes</h4>
+                <span>hits / errors</span>
+              </div>
+              <div id="admin-top-paths" class="admin-table"></div>
+            </article>
+            <article>
+              <div class="admin-section-heading">
+                <h4>Traffic sources</h4>
+                <span>referrers</span>
+              </div>
+              <div id="admin-referrers" class="admin-table"></div>
+            </article>
+            <article class="wide">
+              <div class="admin-section-heading">
+                <h4>Visit stream</h4>
+                <span>latest visitor events</span>
+              </div>
+              <div id="admin-visit-events" class="admin-table admin-table-compact"></div>
+            </article>
+            <article class="wide">
+              <div class="admin-section-heading">
+                <h4>Activity logs</h4>
+                <span>auth / account / analysis</span>
+              </div>
+              <div id="admin-activity-logs" class="admin-table admin-table-compact"></div>
             </article>
             <article class="wide">
               <div class="admin-section-heading">
