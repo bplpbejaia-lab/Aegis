@@ -36,6 +36,7 @@ const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashb
 const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
 const adminUsers = document.querySelector("#admin-users");
+const adminPreorders = document.querySelector("#admin-preorders");
 const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
 const adminTopPaths = document.querySelector("#admin-top-paths");
@@ -603,7 +604,7 @@ function renderAelyxPreorderState() {
   if (aegisPreorderStatus) {
     aegisPreorderStatus.textContent = isRegistered
       ? "You are pre-registered"
-      : "Pre-register for launch perks";
+      : "Click to reserve launch perks";
   }
   aegisPreorderCard?.classList.toggle("is-registered", isRegistered);
   if (confirmAelyxPreorderButton) {
@@ -827,6 +828,7 @@ function setAdminLoading() {
   if (adminSummary) adminSummary.innerHTML = '<p class="admin-empty">Loading dashboard...</p>';
   if (adminLiveRuns) adminLiveRuns.innerHTML = "";
   if (adminUsers) adminUsers.innerHTML = "";
+  if (adminPreorders) adminPreorders.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
   if (adminVisitors) adminVisitors.innerHTML = "";
   if (adminTopPaths) adminTopPaths.innerHTML = "";
@@ -848,6 +850,7 @@ function renderAdminDashboard(data) {
     adminSummary.innerHTML = [
       ["Users", summary.users || 0],
       ["Active sessions", summary.active_sessions || 0],
+      ["Pre-regs", summary.preorders || 0],
       ["External visitors", stats.external_visitors || 0],
       ["Visits", stats.visits || 0],
       ["Unique IPs", stats.unique_ips || 0],
@@ -881,16 +884,31 @@ function renderAdminDashboard(data) {
   renderAdminTable(
     adminUsers,
     dashboard.users || [],
-    ["User", "Plan", "Provider", "Sessions", "Runs", "Seen"],
+    ["User", "Plan", "Provider", "Pre-reg", "Sessions", "Runs", "Seen"],
     (user) => [
       user.username,
       user.is_admin ? "admin" : user.plan,
       user.provider,
+      user.aegis_waitlist_at ? relativeTime(user.aegis_waitlist_at) : "-",
       user.active_sessions || 0,
       user.total_runs || 0,
       relativeTime(user.last_seen_at || user.last_run_at || user.created_at),
     ],
     "No users yet.",
+  );
+  renderAdminTable(
+    adminPreorders,
+    dashboard.preorders || [],
+    ["Reserved", "User", "Email", "Plan", "Provider", "Admin"],
+    (user) => [
+      relativeTime(user.aegis_waitlist_at),
+      user.username,
+      user.email || "-",
+      user.is_admin ? "admin" : user.plan,
+      user.provider,
+      user.is_admin ? "yes" : "no",
+    ],
+    "No Aelyx pre-registrations yet.",
   );
   renderAdminTable(
     adminRuns,

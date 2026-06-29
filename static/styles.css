@@ -386,12 +386,16 @@ button:disabled {
   display: grid;
   gap: 12px;
   margin-top: auto;
+  border: 1px solid rgba(30, 215, 96, 0.26);
+  border-radius: var(--radius);
   padding: 16px;
   background:
-    radial-gradient(circle at 0% 0%, rgba(30, 215, 96, 0.34), transparent 42%),
-    linear-gradient(145deg, rgba(30, 215, 96, 0.18), rgba(18, 18, 18, 0.96) 46%),
+    radial-gradient(circle at 0% 0%, rgba(30, 215, 96, 0.54), transparent 42%),
+    linear-gradient(145deg, rgba(30, 215, 96, 0.24), rgba(18, 18, 18, 0.96) 46%),
     var(--panel);
-  box-shadow: 0 0 32px rgba(30, 215, 96, 0.1);
+  box-shadow:
+    0 0 0 1px rgba(30, 215, 96, 0.08),
+    0 0 42px rgba(30, 215, 96, 0.2);
 }
 
 .sidebar-plan-copy strong {
@@ -410,20 +414,39 @@ button:disabled {
 .aegis-preorder-card {
   position: relative;
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
+  grid-template-columns: 46px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  min-height: 76px;
+  min-height: 92px;
   overflow: hidden;
-  border: 1px solid rgba(30, 215, 96, 0.22);
+  border: 2px solid rgba(30, 215, 96, 0.74);
   border-radius: 8px;
   background:
-    radial-gradient(circle at 15% 0%, rgba(30, 215, 96, 0.26), transparent 54%),
-    rgba(0, 0, 0, 0.32);
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.22), transparent 36%),
+    radial-gradient(circle at 88% 18%, rgba(30, 215, 96, 0.42), transparent 50%),
+    linear-gradient(135deg, rgba(30, 215, 96, 0.32), rgba(0, 0, 0, 0.74) 58%);
   color: var(--ink);
-  padding: 11px;
+  padding: 13px;
   text-align: left;
+  box-shadow:
+    0 16px 42px rgba(0, 0, 0, 0.36),
+    0 0 30px rgba(30, 215, 96, 0.34);
+  animation: preorder-pulse 2.6s ease-in-out infinite;
+}
+
+.aegis-preorder-card::before {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #041108;
+  content: "CLICK";
+  padding: 4px 8px;
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
 }
 
 .aegis-preorder-card::after {
@@ -432,7 +455,23 @@ button:disabled {
   background: linear-gradient(115deg, transparent 20%, rgba(255, 255, 255, 0.13), transparent 54%);
   content: "";
   transform: translateX(-100%);
-  animation: preorder-shine 4s ease-in-out infinite;
+  animation: preorder-shine 3.2s ease-in-out infinite;
+}
+
+@keyframes preorder-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 16px 42px rgba(0, 0, 0, 0.36),
+      0 0 26px rgba(30, 215, 96, 0.26);
+    transform: translateY(0);
+  }
+  50% {
+    box-shadow:
+      0 18px 48px rgba(0, 0, 0, 0.42),
+      0 0 44px rgba(30, 215, 96, 0.58);
+    transform: translateY(-1px);
+  }
 }
 
 @keyframes preorder-shine {
@@ -447,8 +486,8 @@ button:disabled {
 }
 
 .aegis-preorder-card:hover {
-  border-color: rgba(30, 215, 96, 0.48);
-  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.9);
+  transform: translateY(-2px);
 }
 
 .preorder-mark,
@@ -459,38 +498,50 @@ button:disabled {
 
 .preorder-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 46px;
+  height: 46px;
   place-items: center;
   border-radius: 50%;
   background: var(--accent);
   color: #041108;
-  font-size: 17px;
+  font-size: 20px;
   font-weight: 950;
+  box-shadow: 0 0 22px rgba(30, 215, 96, 0.55);
 }
 
 .aegis-preorder-card span:last-child {
   display: grid;
   gap: 4px;
   min-width: 0;
+  padding-right: 62px;
 }
 
 .aegis-preorder-card strong,
+.aegis-preorder-card em,
 .aegis-preorder-card small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.aegis-preorder-card em {
+  color: var(--accent);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
 .aegis-preorder-card strong {
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 950;
 }
 
 .aegis-preorder-card small {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .aegis-preorder-card.is-registered {
@@ -498,6 +549,11 @@ button:disabled {
   background:
     radial-gradient(circle at 18% 10%, rgba(30, 215, 96, 0.34), transparent 58%),
     rgba(9, 32, 16, 0.82);
+  animation: none;
+}
+
+.aegis-preorder-card.is-registered::before {
+  content: "RESERVED";
 }
 
 .site-footer {
@@ -3017,9 +3073,18 @@ button:disabled {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .sidebar-library,
-  .sidebar-plan {
+  .sidebar-library {
     display: none;
+  }
+
+  .sidebar-plan {
+    grid-column: 1 / -1;
+    margin-top: 0;
+    padding: 10px;
+  }
+
+  .aegis-preorder-card {
+    min-height: 72px;
   }
 
   .minimal-shell {
@@ -3105,6 +3170,47 @@ button:disabled {
 
   .admin-period-tabs {
     width: 100%;
+  }
+
+  .sidebar-plan {
+    gap: 8px;
+    border-radius: 16px;
+    padding: 8px;
+  }
+
+  .sidebar-plan-copy {
+    display: none;
+  }
+
+  .aegis-preorder-card {
+    grid-template-columns: 40px minmax(0, 1fr);
+    min-height: 64px;
+    border-radius: 14px;
+    padding: 9px 10px;
+  }
+
+  .aegis-preorder-card::before {
+    top: 6px;
+    right: 6px;
+    padding: 3px 7px;
+  }
+
+  .preorder-mark {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+  }
+
+  .aegis-preorder-card strong {
+    font-size: 14px;
+  }
+
+  .aegis-preorder-card span:last-child {
+    padding-right: 58px;
+  }
+
+  .aegis-preorder-card small {
+    font-size: 11px;
   }
 
   .profile-avatar {

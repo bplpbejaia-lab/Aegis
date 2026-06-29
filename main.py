@@ -1232,6 +1232,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
                 users.provider,
                 users.plan,
                 users.is_admin,
+                users.aegis_waitlist_at,
                 users.created_at,
                 users.updated_at,
                 COUNT(DISTINCT sessions.token) AS active_sessions,
@@ -1249,6 +1250,16 @@ def admin_dashboard_payload() -> dict[str, Any]:
             LIMIT 200
             """,
             (now,),
+        ).fetchall()
+        preorder_rows = connection.execute(
+            """
+            SELECT
+                id, username, email, provider, plan, is_admin,
+                aegis_waitlist_at, created_at, updated_at
+            FROM users
+            WHERE aegis_waitlist_at <> ''
+            ORDER BY aegis_waitlist_at DESC
+            """
         ).fetchall()
         run_rows = connection.execute(
             """
@@ -1302,6 +1313,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
                 (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status = 'completed') AS completed_runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('failed', 'blocked')) AS problem_runs,
+                (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
                 (SELECT COUNT(*) FROM visitor_events) AS visits,
                 (SELECT COUNT(DISTINCT visitor_id) FROM visitor_events) AS unique_visitors,
                 (SELECT COUNT(*) FROM activity_logs) AS activity_logs
@@ -1313,6 +1325,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
     return {
         "summary": row_to_dict(summary),
         "users": [row_to_dict(row) for row in user_rows],
+        "preorders": [row_to_dict(row) for row in preorder_rows],
         "live_runs": [row_to_dict(row) for row in live_rows],
         "recent_runs": [row_to_dict(row) for row in run_rows],
         "usage": [row_to_dict(row) for row in usage_rows],
