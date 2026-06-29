@@ -454,8 +454,6 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS analysis_runs_status_idx ON analysis_runs(status)",
             "CREATE INDEX IF NOT EXISTS visitor_events_created_at_idx ON visitor_events(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS visitor_events_user_id_idx ON visitor_events(user_id)",
-            "CREATE INDEX IF NOT EXISTS visitor_events_session_id_idx ON visitor_events(session_id)",
-            "CREATE INDEX IF NOT EXISTS visitor_events_country_idx ON visitor_events(country)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_last_seen_idx ON visitor_sessions(last_seen_at DESC)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_visitor_id_idx ON visitor_sessions(visitor_id)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_country_idx ON visitor_sessions(country)",
@@ -479,6 +477,12 @@ def init_db() -> None:
             "os": "TEXT NOT NULL DEFAULT ''",
         }.items():
             ensure_column(connection, "visitor_events", column, definition)
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS visitor_events_session_id_idx ON visitor_events(session_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS visitor_events_country_idx ON visitor_events(country)"
+        )
         ensure_admin_user(connection)
         connection.commit()
 
@@ -1516,6 +1520,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
                 COALESCE(ROUND(AVG(page_views))::int, 0) AS avg_page_views,
                 COALESCE(SUM(page_views), 0)::int AS page_views,
+                COUNT(DISTINCT NULLIF(ip_address, ''))::int AS unique_ips,
                 COUNT(*) FILTER (WHERE duration_seconds >= 30 OR page_views > 1)::int AS engaged_sessions,
                 COUNT(*) FILTER (WHERE page_views <= 1 AND duration_seconds < 15)::int AS bounce_sessions,
                 COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions
@@ -1570,6 +1575,42 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             GROUP BY visitor_id
             ORDER BY last_seen_at DESC
             LIMIT 100
+            """
+        ).fetchall()
+        ip_rows = connection.execute(
+            f"""
+            SELECT
+                COALESCE(NULLIF(ip_address, ''), 'unknown') AS ip_address,
+                COUNT(DISTINCT visitor_id)::int AS visitors,
+                COUNT(*)::int AS sessions,
+                COUNT(*) FILTER (WHERE user_id IS NULL)::int AS external_sessions,
+                COALESCE(SUM(page_views), 0)::int AS page_views,
+                COALESCE(SUM(api_hits), 0)::int AS api_hits,
+                COALESCE(SUM(events), 0)::int AS events,
+                COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
+                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions,
+                MIN(started_at) AS first_seen_at,
+                MAX(last_seen_at) AS last_seen_at,
+                (ARRAY_AGG(visitor_id ORDER BY last_seen_at DESC))[1] AS last_visitor_id,
+                (ARRAY_AGG(country ORDER BY last_seen_at DESC))[1] AS country,
+                (ARRAY_AGG(region ORDER BY last_seen_at DESC))[1] AS region,
+                (ARRAY_AGG(city ORDER BY last_seen_at DESC))[1] AS city,
+                (ARRAY_AGG(language ORDER BY last_seen_at DESC))[1] AS language,
+                (ARRAY_AGG(device_type ORDER BY last_seen_at DESC))[1] AS device_type,
+                (ARRAY_AGG(browser ORDER BY last_seen_at DESC))[1] AS browser,
+                (ARRAY_AGG(os ORDER BY last_seen_at DESC))[1] AS os,
+                (ARRAY_AGG(utm_source ORDER BY last_seen_at DESC))[1] AS utm_source,
+                (ARRAY_AGG(utm_medium ORDER BY last_seen_at DESC))[1] AS utm_medium,
+                (ARRAY_AGG(utm_campaign ORDER BY last_seen_at DESC))[1] AS utm_campaign,
+                (ARRAY_AGG(referrer ORDER BY last_seen_at DESC))[1] AS last_referrer,
+                (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS first_landing_path,
+                (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path
+            FROM visitor_sessions
+            WHERE {session_clause}
+            GROUP BY 1
+            ORDER BY visitors DESC, sessions DESC, last_seen_at DESC
+            LIMIT 120
             """
         ).fetchall()
         session_rows = connection.execute(
@@ -1670,7 +1711,8 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
         recent_visits = connection.execute(
             f"""
             SELECT
-                id, visitor_id, user_id, ip_address, method, path, query_string,
+                id, visitor_id, session_id, user_id, ip_address, country, region, city,
+                language, device_type, browser, os, method, path, query_string,
                 status_code, referrer, user_agent, created_at
             FROM visitor_events
             WHERE {where_clause}
@@ -1692,6 +1734,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             "session_stats": row_to_dict(session_stats),
             "activity_stats": row_to_dict(activity_stats),
             "visitors": [row_to_dict(row) for row in visitors],
+            "ips": [row_to_dict(row) for row in ip_rows],
             "sessions": [row_to_dict(row) for row in session_rows],
             "geo": [row_to_dict(row) for row in geo_rows],
             "devices": [row_to_dict(row) for row in device_rows],

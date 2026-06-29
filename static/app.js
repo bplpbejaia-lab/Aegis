@@ -39,6 +39,7 @@ const adminUsers = document.querySelector("#admin-users");
 const adminPreorders = document.querySelector("#admin-preorders");
 const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
+const adminIps = document.querySelector("#admin-ips");
 const adminTopPaths = document.querySelector("#admin-top-paths");
 const adminReferrers = document.querySelector("#admin-referrers");
 const adminGeo = document.querySelector("#admin-geo");
@@ -870,6 +871,7 @@ function setAdminLoading() {
   if (adminPreorders) adminPreorders.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
   if (adminVisitors) adminVisitors.innerHTML = "";
+  if (adminIps) adminIps.innerHTML = "";
   if (adminTopPaths) adminTopPaths.innerHTML = "";
   if (adminReferrers) adminReferrers.innerHTML = "";
   if (adminGeo) adminGeo.innerHTML = "";
@@ -895,10 +897,11 @@ function renderAdminDashboard(data) {
       ["Users", summary.users || 0],
       ["Active sessions", summary.active_sessions || 0],
       ["Pre-regs", summary.preorders || 0],
+      ["Distinct visitors", sessionStats.session_visitors || stats.unique_visitors || 0],
       ["External visitors", stats.external_visitors || 0],
+      ["Distinct IPs", sessionStats.unique_ips || stats.unique_ips || 0],
       ["Sessions", sessionStats.sessions || 0],
       ["Visits", stats.visits || 0],
-      ["Unique IPs", stats.unique_ips || 0],
       ["Avg time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
       ["Engaged", sessionStats.engaged_sessions || 0],
       ["Conversions", sessionStats.preorder_conversions || 0],
@@ -977,18 +980,38 @@ function renderAdminDashboard(data) {
   renderAdminTable(
     adminVisitors,
     externalVisitors,
-    ["Visitor", "Region", "Device", "Source", "Pages", "Time", "Last path", "Seen"],
+    ["Visitor ID", "IPs", "Sessions", "Pages", "Time", "Region", "Device", "Source", "Last path", "Seen"],
     (visitor) => [
       shortVisitorId(visitor.visitor_id),
+      visitor.unique_ips || 0,
+      visitor.sessions || 0,
+      visitor.page_views || 0,
+      formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000),
       visitorRegion(visitor),
       visitorDevice(visitor),
       visitorSource(visitor),
-      visitor.page_views || 0,
-      formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000),
       compactPath(visitor.last_path),
       relativeTime(visitor.last_seen_at),
     ],
     "No visitors in this period.",
+  );
+  renderAdminTable(
+    adminIps,
+    insights.ips || [],
+    ["IP", "Visitors", "Sessions", "External", "Pages", "Time", "Region", "Device", "Source", "Last seen"],
+    (ip) => [
+      ip.ip_address || "unknown",
+      ip.visitors || 0,
+      ip.sessions || 0,
+      ip.external_sessions || 0,
+      ip.page_views || 0,
+      formatDuration((ip.max_duration_seconds || ip.avg_duration_seconds || 0) * 1000),
+      visitorRegion(ip),
+      visitorDevice(ip),
+      visitorSource(ip),
+      relativeTime(ip.last_seen_at),
+    ],
+    "No distinct IPs in this period.",
   );
   renderAdminTable(
     adminTopPaths,
@@ -1143,6 +1166,7 @@ function selectedAdminInsights(data) {
     session_stats: {},
     activity_stats: {},
     visitors: [],
+    ips: [],
     sessions: [],
     geo: [],
     devices: [],
