@@ -10,7 +10,6 @@ import os
 import re
 import secrets
 import socket
-import sqlite3
 import ssl
 import threading
 import time
@@ -18,14 +17,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
+import psycopg
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 try:
     from dotenv import load_dotenv
@@ -40,7 +42,16 @@ if load_dotenv:
 
 MAX_BODY_BYTES = 1_200_000
 PUBLIC_MODEL_LABEL = "sheepstealer"
-DATABASE_PATH = os.getenv("AEGIS_DB_PATH", os.path.join(APP_DIR, "aegis.sqlite3"))
+DATABASE_URL = (os.getenv("AEGIS_DATABASE_URL") or os.getenv("DATABASE_URL") or "").strip()
+POSTGRES_SCHEMES = ("postgres://", "postgresql://")
+VISITOR_COOKIE_NAME = "aegis_vid"
+LOG_STATIC_VISITS = os.getenv("AEGIS_LOG_STATIC_VISITS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+MAX_LOG_VALUE_LENGTH = int(os.getenv("AEGIS_MAX_LOG_VALUE_LENGTH", "2000"))
 SESSION_TTL_DAYS = int(os.getenv("AEGIS_SESSION_TTL_DAYS", "30"))
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "caraxes88").strip()
@@ -232,10 +243,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def db_connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+def db_connect() -> psycopg.Connection:
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is required. Add a Railway PostgreSQL database and expose "
+            "its DATABASE_URL variable to this service."
+        )
+    if not DATABASE_URL.lower().startswith(POSTGRES_SCHEMES):
+        raise RuntimeError("DATABASE_URL must be a postgres:// or postgresql:// URL.")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -281,12 +297,11 @@ def public_plans() -> list[dict[str, Any]]:
 
 
 def init_db() -> None:
-    os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
     with DB_LOCK, db_connect() as connection:
-        connection.executescript(
+        for statement in (
             """
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 password_salt TEXT NOT NULL DEFAULT '',
                 password_hash TEXT NOT NULL DEFAULT '',
@@ -298,17 +313,19 @@ def init_db() -> None:
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );
-
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
                 created_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL DEFAULT '',
                 expires_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS usage_counters (
                 subject TEXT NOT NULL,
                 engine TEXT NOT NULL,
@@ -317,11 +334,12 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(subject, engine, period_key)
-            );
-
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS analysis_runs (
                 id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
                 username TEXT NOT NULL,
                 user_plan TEXT NOT NULL,
                 ip_address TEXT NOT NULL,
@@ -343,44 +361,101 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 completed_at TEXT NOT NULL DEFAULT '',
                 duration_ms INTEGER NOT NULL DEFAULT 0,
+                report_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
+            )
+            """,
             """
-        )
+            CREATE TABLE IF NOT EXISTS visitor_events (
+                id BIGSERIAL PRIMARY KEY,
+                visitor_id TEXT NOT NULL,
+                user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                session_token_hash TEXT NOT NULL DEFAULT '',
+                ip_address TEXT NOT NULL DEFAULT '',
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                query_string TEXT NOT NULL DEFAULT '',
+                status_code INTEGER NOT NULL DEFAULT 0,
+                referrer TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                category TEXT NOT NULL,
+                action TEXT NOT NULL,
+                ip_address TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id)",
+            "CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_unique_idx ON users(lower(username))",
+            "CREATE INDEX IF NOT EXISTS usage_counters_updated_at_idx ON usage_counters(updated_at)",
+            "CREATE INDEX IF NOT EXISTS analysis_runs_user_started_idx ON analysis_runs(user_id, started_at DESC)",
+            "CREATE INDEX IF NOT EXISTS analysis_runs_status_idx ON analysis_runs(status)",
+            "CREATE INDEX IF NOT EXISTS visitor_events_created_at_idx ON visitor_events(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS visitor_events_user_id_idx ON visitor_events(user_id)",
+            "CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS activity_logs_user_id_idx ON activity_logs(user_id)",
+        ):
+            connection.execute(statement)
         ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "analysis_runs", "report_json", "JSONB NOT NULL DEFAULT '{}'::jsonb")
         ensure_admin_user(connection)
         connection.commit()
 
 
+def sql_identifier(value: str) -> str:
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", value):
+        raise ValueError(f"Unsafe SQL identifier: {value}")
+    return value
+
+
 def ensure_column(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     table: str,
     column: str,
     definition: str,
 ) -> None:
-    columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
-    if any(row["name"] == column for row in columns):
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+        """,
+        (table, column),
+    ).fetchone()
+    if row:
         return
-    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    connection.execute(
+        f"ALTER TABLE {sql_identifier(table)} "
+        f"ADD COLUMN {sql_identifier(column)} {definition}"
+    )
 
 
-def ensure_admin_user(connection: sqlite3.Connection) -> None:
+def ensure_admin_user(connection: psycopg.Connection) -> None:
     if not ADMIN_USERNAME or not ADMIN_PASSWORD:
         return
     now = utc_now()
     salt, digest = hash_password(ADMIN_PASSWORD)
     existing = connection.execute(
-        "SELECT id FROM users WHERE lower(username) = lower(?)",
+        "SELECT id FROM users WHERE lower(username) = lower(%s)",
         (ADMIN_USERNAME,),
     ).fetchone()
     if existing:
         connection.execute(
             """
             UPDATE users
-            SET password_salt = ?, password_hash = ?, plan = 'pro_3',
-                is_admin = 1, provider = 'local', updated_at = ?
-            WHERE id = ?
+            SET password_salt = %s, password_hash = %s, plan = 'pro_3',
+                is_admin = 1, provider = 'local', updated_at = %s
+            WHERE id = %s
             """,
             (salt, digest, now, existing["id"]),
         )
@@ -391,13 +466,13 @@ def ensure_admin_user(connection: sqlite3.Connection) -> None:
             username, password_salt, password_hash, provider, plan,
             is_admin, created_at, updated_at
         )
-        VALUES (?, ?, ?, 'local', 'pro_3', 1, ?, ?)
+        VALUES (%s, %s, %s, 'local', 'pro_3', 1, %s, %s)
         """,
         (ADMIN_USERNAME, salt, digest, now, now),
     )
 
 
-def serialize_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def serialize_user(row: dict[str, Any]) -> dict[str, Any]:
     is_admin = bool(row["is_admin"])
     plan_id = str(row["plan"] or DEFAULT_PLAN)
     return {
@@ -419,7 +494,7 @@ def create_session(user_id: int) -> str:
         connection.execute(
             """
             INSERT INTO sessions (token, user_id, created_at, last_seen_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (token, user_id, now.isoformat(), now.isoformat(), expires_at.isoformat()),
         )
@@ -444,13 +519,13 @@ def authenticate_request(request: Request) -> dict[str, Any] | None:
             SELECT users.*
             FROM sessions
             JOIN users ON users.id = sessions.user_id
-            WHERE sessions.token = ? AND sessions.expires_at > ?
+            WHERE sessions.token = %s AND sessions.expires_at > %s
             """,
             (token, utc_now()),
         ).fetchone()
         if row:
             connection.execute(
-                "UPDATE sessions SET last_seen_at = ? WHERE token = ?",
+                "UPDATE sessions SET last_seen_at = %s WHERE token = %s",
                 (utc_now(), token),
             )
             connection.commit()
@@ -475,6 +550,164 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+SENSITIVE_LOG_KEYS = {
+    "authorization",
+    "credential",
+    "hf_token",
+    "key",
+    "password",
+    "secret",
+    "session",
+    "token",
+}
+
+
+def clamp_log_value(value: Any, limit: int = MAX_LOG_VALUE_LENGTH) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[:limit]}...[truncated]"
+
+
+def is_sensitive_log_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(marker in lowered for marker in SENSITIVE_LOG_KEYS)
+
+
+def safe_metadata(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            clamp_log_value(key, 120): (
+                "[redacted]" if is_sensitive_log_key(str(key)) else safe_metadata(item, depth + 1)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [safe_metadata(item, depth + 1) for item in value[:40]]
+    if isinstance(value, tuple):
+        return [safe_metadata(item, depth + 1) for item in list(value)[:40]]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return clamp_log_value(value)
+
+
+def json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
+def redacted_query_string(request: Request) -> str:
+    pairs: list[tuple[str, str]] = []
+    for key, value in request.query_params.multi_items():
+        safe_value = "[redacted]" if is_sensitive_log_key(key) else clamp_log_value(value, 400)
+        pairs.append((key, safe_value))
+    return clamp_log_value(urlencode(pairs), 1200)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
+
+
+def request_user_agent(request: Request) -> str:
+    return clamp_log_value(request.headers.get("user-agent", ""), 600)
+
+
+def request_referrer(request: Request) -> str:
+    return clamp_log_value(request.headers.get("referer", ""), 1200)
+
+
+def request_is_secure(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    return forwarded_proto == "https" or request.url.scheme == "https"
+
+
+def should_log_visit(request: Request) -> bool:
+    path = request.url.path
+    if path == "/health":
+        return False
+    if path.startswith("/static/") and not LOG_STATIC_VISITS:
+        return False
+    return True
+
+
+def session_user_id(connection: psycopg.Connection, token: str) -> int | None:
+    if not token:
+        return None
+    row = connection.execute(
+        """
+        SELECT user_id
+        FROM sessions
+        WHERE token = %s AND expires_at > %s
+        """,
+        (token, utc_now()),
+    ).fetchone()
+    return int(row["user_id"]) if row else None
+
+
+def log_visit_event(request: Request, status_code: int, visitor_id: str) -> None:
+    if not should_log_visit(request):
+        return
+    token = bearer_token(request)
+    try:
+        with DB_LOCK, db_connect() as connection:
+            user_id = session_user_id(connection, token)
+            connection.execute(
+                """
+                INSERT INTO visitor_events (
+                    visitor_id, user_id, session_token_hash, ip_address, method,
+                    path, query_string, status_code, referrer, user_agent, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    visitor_id,
+                    user_id,
+                    token_hash(token),
+                    client_ip(request),
+                    request.method,
+                    clamp_log_value(request.url.path, 800),
+                    redacted_query_string(request),
+                    int(status_code or 0),
+                    request_referrer(request),
+                    request_user_agent(request),
+                    utc_now(),
+                ),
+            )
+            connection.commit()
+    except Exception as exc:
+        print(f"Aegis visit logging failed: {exc}")
+
+
+def log_activity(
+    category: str,
+    action: str,
+    user_id: int | None = None,
+    request: Request | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        with DB_LOCK, db_connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO activity_logs (
+                    user_id, category, action, ip_address, user_agent, metadata, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    clamp_log_value(category, 80),
+                    clamp_log_value(action, 120),
+                    client_ip(request) if request else "",
+                    request_user_agent(request) if request else "",
+                    Jsonb(safe_metadata(metadata or {})),
+                    utc_now(),
+                ),
+            )
+            connection.commit()
+    except Exception as exc:
+        print(f"Aegis activity logging failed: {exc}")
+
+
 def create_local_user(username: str, password: str, plan: str) -> tuple[str, dict[str, Any]]:
     clean_username = username.strip()
     if not clean_username:
@@ -483,31 +716,33 @@ def create_local_user(username: str, password: str, plan: str) -> tuple[str, dic
     now = utc_now()
     plan_id = normalize_plan(plan)
     with DB_LOCK, db_connect() as connection:
-        try:
-            cursor = connection.execute(
-                """
-                INSERT INTO users (
-                    username, password_salt, password_hash, provider, plan,
-                    created_at, updated_at
-                )
-                VALUES (?, ?, ?, 'local', ?, ?, ?)
-                """,
-                (clean_username, salt, digest, plan_id, now, now),
+        cursor = connection.execute(
+            """
+            INSERT INTO users (
+                username, password_salt, password_hash, provider, plan,
+                created_at, updated_at
             )
-            user_id = int(cursor.lastrowid)
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail="Username already exists.") from exc
+            VALUES (%s, %s, %s, 'local', %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            (clean_username, salt, digest, plan_id, now, now),
+        )
+        created = cursor.fetchone()
+        if not created:
+            raise HTTPException(status_code=409, detail="Username already exists.")
+        user_id = int(created["id"])
+        connection.commit()
     token = create_session(user_id)
     with DB_LOCK, db_connect() as connection:
-        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     return token, serialize_user(row)
 
 
 def login_local_user(username: str, password: str) -> tuple[str, dict[str, Any]]:
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
-            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            "SELECT * FROM users WHERE lower(username) = lower(%s)",
             (username.strip(),),
         ).fetchone()
     if not row or row["provider"] != "local":
@@ -563,7 +798,7 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
             row = connection.execute(
                 """
                 SELECT count FROM usage_counters
-                WHERE subject = ? AND engine = ? AND period_key = ?
+                WHERE subject = %s AND engine = %s AND period_key = %s
                 """,
                 (subject, engine, key),
             ).fetchone()
@@ -584,7 +819,7 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
             connection.execute(
                 """
                 INSERT INTO usage_counters (subject, engine, period_key, count, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
+                VALUES (%s, %s, %s, 1, %s, %s)
                 ON CONFLICT(subject, engine, period_key)
                 DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
                 """,
@@ -638,7 +873,7 @@ def usage_snapshot(user: dict[str, Any], ip_address: str = "") -> dict[str, Any]
                 row = connection.execute(
                     """
                     SELECT count FROM usage_counters
-                    WHERE subject = ? AND engine = ? AND period_key = ?
+                    WHERE subject = %s AND engine = %s AND period_key = %s
                     """,
                     (subject, engine, key),
                 ).fetchone()
@@ -664,10 +899,10 @@ def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
     plan_id = normalize_plan(plan)
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            "UPDATE users SET plan = ?, updated_at = ? WHERE id = ? AND is_admin = 0",
+            "UPDATE users SET plan = %s, updated_at = %s WHERE id = %s AND is_admin = 0",
             (plan_id, utc_now(), user_id),
         )
-        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
         connection.commit()
     return serialize_user(row)
 
@@ -684,14 +919,16 @@ def create_analysis_run(
     run_id = sanitize_run_id(requested_run_id) or uuid.uuid4().hex
     now = utc_now()
     with DB_LOCK, db_connect() as connection:
-        try:
-            connection.execute(
+        for _ in range(2):
+            cursor = connection.execute(
                 """
                 INSERT INTO analysis_runs (
                     id, user_id, username, user_plan, ip_address, target, engine,
                     validation_mode, proof_authorized, status, started_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
                 """,
                 (
                     run_id,
@@ -707,30 +944,13 @@ def create_analysis_run(
                     now,
                 ),
             )
-        except sqlite3.IntegrityError:
+            created = cursor.fetchone()
+            if created:
+                run_id = str(created["id"])
+                break
             run_id = uuid.uuid4().hex
-            connection.execute(
-                """
-                INSERT INTO analysis_runs (
-                    id, user_id, username, user_plan, ip_address, target, engine,
-                    validation_mode, proof_authorized, status, started_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-                """,
-                (
-                    run_id,
-                    int(user["id"]),
-                    str(user["username"]),
-                    str(user["plan"]["id"]),
-                    ip_address,
-                    target,
-                    engine,
-                    validation_mode,
-                    1 if proof_authorized else 0,
-                    now,
-                    now,
-                ),
-            )
+        else:
+            raise HTTPException(status_code=409, detail="Could not allocate analysis run id.")
         connection.commit()
     return run_id
 
@@ -750,7 +970,7 @@ def cancel_analysis_run(run_id: str, user: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid run id.")
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
-            "SELECT id, user_id, status FROM analysis_runs WHERE id = ?",
+            "SELECT id, user_id, status FROM analysis_runs WHERE id = %s",
             (clean_run_id,),
         ).fetchone()
         if not row:
@@ -763,8 +983,8 @@ def cancel_analysis_run(run_id: str, user: dict[str, Any]) -> dict[str, Any]:
         connection.execute(
             """
             UPDATE analysis_runs
-            SET status = 'cancelled', completed_at = ?, updated_at = ?, error = ?
-            WHERE id = ?
+            SET status = 'cancelled', completed_at = %s, updated_at = %s, error = %s
+            WHERE id = %s
             """,
             (utc_now(), utc_now(), "Cancelled by user.", clean_run_id),
         )
@@ -788,23 +1008,24 @@ def update_analysis_run(run_id: str | None, **fields: Any) -> None:
         "error",
         "completed_at",
         "duration_ms",
+        "report_json",
     }
     assignments = []
     values: list[Any] = []
     for key, value in fields.items():
         if key not in allowed_fields:
             continue
-        assignments.append(f"{key} = ?")
-        values.append(value)
+        assignments.append(f"{sql_identifier(key)} = %s")
+        values.append(Jsonb(json_safe(value or {})) if key == "report_json" else value)
     if not assignments:
         return
-    assignments.append("updated_at = ?")
+    assignments.append("updated_at = %s")
     values.append(utc_now())
     values.append(run_id)
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            f"UPDATE analysis_runs SET {', '.join(assignments)} WHERE id = ?",
-            values,
+            f"UPDATE analysis_runs SET {', '.join(assignments)} WHERE id = %s",
+            tuple(values),
         )
         connection.commit()
 
@@ -829,11 +1050,12 @@ def finish_analysis_run(
         high=int(counts.get("high") or 0),
         medium=int(counts.get("medium") or 0),
         low=int(counts.get("low") or counts.get("light") or 0),
+        report_json=report or {},
         error=error[:1000],
     )
 
 
-def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
@@ -848,10 +1070,10 @@ def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]
     """
     params: tuple[Any, ...]
     if user.get("is_admin"):
-        query += " ORDER BY started_at DESC LIMIT ?"
+        query += " ORDER BY started_at DESC LIMIT %s"
         params = (run_limit,)
     else:
-        query += " WHERE user_id = ? ORDER BY started_at DESC LIMIT ?"
+        query += " WHERE user_id = %s ORDER BY started_at DESC LIMIT %s"
         params = (int(user["id"]), run_limit)
     with DB_LOCK, db_connect() as connection:
         rows = connection.execute(query, params).fetchall()
@@ -861,18 +1083,18 @@ def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]
 def preorder_aegis(user_id: int) -> dict[str, Any]:
     now = utc_now()
     with DB_LOCK, db_connect() as connection:
-        row = connection.execute("SELECT aegis_waitlist_at FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = connection.execute("SELECT aegis_waitlist_at FROM users WHERE id = %s", (user_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
         waitlist_at = str(row["aegis_waitlist_at"] or "")
         if not waitlist_at:
             waitlist_at = now
             connection.execute(
-                "UPDATE users SET aegis_waitlist_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE users SET aegis_waitlist_at = %s, updated_at = %s WHERE id = %s",
                 (waitlist_at, now, user_id),
             )
             connection.commit()
-        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        updated = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     return serialize_user(updated)
 
 
@@ -897,7 +1119,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
                 MAX(analysis_runs.updated_at) AS last_run_at
             FROM users
             LEFT JOIN sessions
-                ON sessions.user_id = users.id AND sessions.expires_at > ?
+                ON sessions.user_id = users.id AND sessions.expires_at > %s
             LEFT JOIN analysis_runs
                 ON analysis_runs.user_id = users.id
             GROUP BY users.id
@@ -931,15 +1153,36 @@ def admin_dashboard_payload() -> dict[str, Any]:
             LIMIT 200
             """
         ).fetchall()
+        visit_rows = connection.execute(
+            """
+            SELECT
+                id, visitor_id, user_id, ip_address, method, path, query_string,
+                status_code, referrer, user_agent, created_at
+            FROM visitor_events
+            ORDER BY created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+        activity_rows = connection.execute(
+            """
+            SELECT id, user_id, category, action, ip_address, user_agent, metadata, created_at
+            FROM activity_logs
+            ORDER BY created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
         summary = connection.execute(
             """
             SELECT
                 (SELECT COUNT(*) FROM users) AS users,
-                (SELECT COUNT(*) FROM sessions WHERE expires_at > ?) AS active_sessions,
+                (SELECT COUNT(*) FROM sessions WHERE expires_at > %s) AS active_sessions,
                 (SELECT COUNT(*) FROM analysis_runs) AS runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status = 'completed') AS completed_runs,
-                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('failed', 'blocked')) AS problem_runs
+                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('failed', 'blocked')) AS problem_runs,
+                (SELECT COUNT(*) FROM visitor_events) AS visits,
+                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_events) AS unique_visitors,
+                (SELECT COUNT(*) FROM activity_logs) AS activity_logs
             """,
             (now,),
         ).fetchone()
@@ -950,6 +1193,8 @@ def admin_dashboard_payload() -> dict[str, Any]:
         "live_runs": [row_to_dict(row) for row in live_rows],
         "recent_runs": [row_to_dict(row) for row in run_rows],
         "usage": [row_to_dict(row) for row in usage_rows],
+        "visits": [row_to_dict(row) for row in visit_rows],
+        "activity": [row_to_dict(row) for row in activity_rows],
         "generated_at": now,
     }
 
@@ -957,6 +1202,30 @@ def admin_dashboard_payload() -> dict[str, Any]:
 app = FastAPI(title="Aelyx Autonomous Hosting & Security Analyst")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 init_db()
+
+
+@app.middleware("http")
+async def capture_visit_events(request: Request, call_next):
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or secrets.token_urlsafe(18)
+    should_set_cookie = VISITOR_COOKIE_NAME not in request.cookies
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception:
+        log_visit_event(request, status_code, visitor_id)
+        raise
+    log_visit_event(request, status_code, visitor_id)
+    if should_set_cookie:
+        response.set_cookie(
+            VISITOR_COOKIE_NAME,
+            visitor_id,
+            max_age=60 * 60 * 24 * 365,
+            httponly=True,
+            secure=request_is_secure(request),
+            samesite="lax",
+        )
+    return response
 
 
 @app.get("/")
@@ -991,29 +1260,61 @@ def api_session(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/auth/signup")
-def api_signup(payload: SignupRequest) -> dict[str, Any]:
+def api_signup(request: Request, payload: SignupRequest) -> dict[str, Any]:
     token, user = create_local_user(payload.username, payload.password, payload.plan)
+    log_activity(
+        "auth",
+        "signup",
+        int(user["id"]),
+        request,
+        {"username": user["username"], "provider": user["provider"], "plan": user["plan"]["id"]},
+    )
     return {"token": token, "user": user}
 
 
 @app.post("/api/auth/login")
-def api_login(payload: LoginRequest) -> dict[str, Any]:
-    token, user = login_local_user(payload.username, payload.password)
+def api_login(request: Request, payload: LoginRequest) -> dict[str, Any]:
+    try:
+        token, user = login_local_user(payload.username, payload.password)
+    except HTTPException as exc:
+        log_activity(
+            "auth",
+            "login_failed",
+            None,
+            request,
+            {"username": payload.username, "status_code": exc.status_code},
+        )
+        raise
+    log_activity(
+        "auth",
+        "login",
+        int(user["id"]),
+        request,
+        {"username": user["username"], "provider": user["provider"], "plan": user["plan"]["id"]},
+    )
     return {"token": token, "user": user}
 
 
 @app.post("/api/auth/logout")
 def api_logout(request: Request) -> dict[str, bool]:
+    user = authenticate_request(request)
     token = bearer_token(request)
     if token:
         with DB_LOCK, db_connect() as connection:
-            connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            connection.execute("DELETE FROM sessions WHERE token = %s", (token,))
             connection.commit()
+    log_activity(
+        "auth",
+        "logout",
+        int(user["id"]) if user else None,
+        request,
+        {"session_token_hash": token_hash(token)},
+    )
     return {"ok": True}
 
 
 @app.post("/api/auth/google")
-async def api_google(payload: GoogleAuthRequest) -> dict[str, Any]:
+async def api_google(request: Request, payload: GoogleAuthRequest) -> dict[str, Any]:
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
@@ -1038,15 +1339,19 @@ async def api_google(payload: GoogleAuthRequest) -> dict[str, Any]:
     plan_id = normalize_plan(payload.plan)
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
-            "SELECT * FROM users WHERE google_sub = ? OR lower(email) = lower(?)",
-            (subject, email),
+            """
+            SELECT *
+            FROM users
+            WHERE google_sub = %s OR lower(email) = lower(%s) OR lower(username) = lower(%s)
+            """,
+            (subject, email, email),
         ).fetchone()
         if row:
             connection.execute(
                 """
                 UPDATE users
-                SET google_sub = ?, email = ?, provider = 'google', updated_at = ?
-                WHERE id = ?
+                SET google_sub = %s, email = %s, provider = 'google', updated_at = %s
+                WHERE id = %s
                 """,
                 (subject, email, now, row["id"]),
             )
@@ -1057,15 +1362,28 @@ async def api_google(payload: GoogleAuthRequest) -> dict[str, Any]:
                 INSERT INTO users (
                     username, email, google_sub, provider, plan, created_at, updated_at
                 )
-                VALUES (?, ?, ?, 'google', ?, ?, ?)
+                VALUES (%s, %s, %s, 'google', %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
                 """,
                 (email, email, subject, plan_id, now, now),
             )
-            user_id = int(cursor.lastrowid)
+            created = cursor.fetchone()
+            if not created:
+                raise HTTPException(status_code=409, detail="Account already exists.")
+            user_id = int(created["id"])
         connection.commit()
-        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     token = create_session(user_id)
-    return {"token": token, "user": serialize_user(row)}
+    user = serialize_user(row)
+    log_activity(
+        "auth",
+        "google_login",
+        int(user["id"]),
+        request,
+        {"username": user["username"], "email": user["email"], "plan": user["plan"]["id"]},
+    )
+    return {"token": token, "user": user}
 
 
 @app.post("/api/account/plan")
@@ -1091,7 +1409,15 @@ def api_account_runs(request: Request, limit: int = 8) -> dict[str, Any]:
 @app.post("/api/account/aegis-preorder")
 def api_account_aegis_preorder(request: Request) -> dict[str, Any]:
     user = require_user(request)
-    return {"user": preorder_aegis(int(user["id"]))}
+    updated_user = preorder_aegis(int(user["id"]))
+    log_activity(
+        "account",
+        "aegis_preorder",
+        int(user["id"]),
+        request,
+        {"aegis_waitlist_at": updated_user.get("aegis_waitlist_at", "")},
+    )
+    return {"user": updated_user}
 
 
 @app.get("/api/admin/dashboard")
@@ -1105,7 +1431,15 @@ def api_admin_dashboard(request: Request) -> dict[str, Any]:
 @app.post("/api/analyze/{run_id}/cancel")
 def api_cancel_analysis(run_id: str, request: Request) -> dict[str, Any]:
     user = require_user(request)
-    return cancel_analysis_run(run_id, user)
+    result = cancel_analysis_run(run_id, user)
+    log_activity(
+        "analysis",
+        "cancel",
+        int(user["id"]),
+        request,
+        {"run_id": result.get("run_id"), "status": result.get("status")},
+    )
+    return result
 
 
 @app.post("/api/analyze")
@@ -1139,6 +1473,14 @@ async def run_analysis(
             int((time.perf_counter() - started_at) * 1000),
             error="Cancelled by user.",
         )
+        if auth_context:
+            log_activity(
+                "analysis",
+                "cancelled",
+                int(auth_context["id"]),
+                request,
+                {"run_id": run_id, "reason": "client_disconnected_or_cancelled"},
+            )
         return event(
             "cancelled",
             {
@@ -1234,10 +1576,30 @@ async def run_analysis(
             payload.proof_authorized,
             payload.client_run_id,
         )
+        log_activity(
+            "analysis",
+            "created",
+            int(auth_context["id"]),
+            request,
+            {
+                "run_id": run_id,
+                "target": target_url,
+                "engine": selected_engine,
+                "validation_mode": validation_mode,
+                "proof_authorized": payload.proof_authorized,
+            },
+        )
         yield event("run", {"run_id": run_id})
         quota = reserve_usage(auth_context, ip_address, selected_engine)
         yield event("quota", quota)
         if not quota.get("allowed"):
+            log_activity(
+                "analysis",
+                "quota_blocked",
+                int(auth_context["id"]),
+                request,
+                {"run_id": run_id, "engine": selected_engine, "quota": quota},
+            )
             update_analysis_run(
                 run_id,
                 status="blocked",
@@ -1374,6 +1736,19 @@ async def run_analysis(
                 reason_phrase="sheepstealer" if is_sheepstealer else "Aelyx Engine",
             )
             finish_analysis_run(run_id, "completed", elapsed_ms, direct_report)
+            log_activity(
+                "analysis",
+                "completed",
+                int(auth_context["id"]),
+                request,
+                {
+                    "run_id": run_id,
+                    "target": target_url,
+                    "engine": selected_engine,
+                    "duration_ms": elapsed_ms,
+                    "score": direct_report.get("score", 0),
+                },
+            )
             yield event("metrics", direct_report["summary"])
             yield event("report", direct_report)
             yield event("done", {"duration_ms": elapsed_ms})
@@ -1565,6 +1940,19 @@ async def run_analysis(
         local_report["steps"] = steps
         local_report["duration_ms"] = elapsed_ms
         finish_analysis_run(run_id, "completed", elapsed_ms, local_report)
+        log_activity(
+            "analysis",
+            "completed",
+            int(auth_context["id"]),
+            request,
+            {
+                "run_id": run_id,
+                "target": target_url,
+                "engine": selected_engine,
+                "duration_ms": elapsed_ms,
+                "score": local_report.get("score", 0),
+            },
+        )
         yield event("report", local_report)
         yield event("done", {"duration_ms": elapsed_ms})
 
@@ -1575,6 +1963,14 @@ async def run_analysis(
             int((time.perf_counter() - started_at) * 1000),
             error=str(exc),
         )
+        if auth_context:
+            log_activity(
+                "analysis",
+                "failed",
+                int(auth_context["id"]),
+                request,
+                {"run_id": run_id, "error": str(exc)},
+            )
         yield event("error", {"message": str(exc)})
 
 

@@ -7,11 +7,37 @@ Premium FastAPI web app for an autonomous hosting and passive security-analysis 
 ```powershell
 python -m pip install -r requirements.txt
 copy .env.example .env
-# edit .env and set HF_TOKENS
+# edit .env and set DATABASE_URL plus HF_TOKENS
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 Open http://127.0.0.1:8000.
+
+## Database
+
+Aegis requires PostgreSQL. There is no SQLite fallback.
+
+On Railway:
+
+1. Add a PostgreSQL database service to the project.
+2. Open the Aegis web service variables.
+3. Add `DATABASE_URL=${{Postgres.DATABASE_URL}}` as a reference variable from the PostgreSQL service.
+4. Deploy the web service. On startup, `main.py` creates the required tables and indexes.
+
+Stored data includes:
+
+- `users`: local and Google accounts, plan, admin flag, waitlist state.
+- `sessions`: login sessions and last-seen timestamps.
+- `usage_counters`: quota counters.
+- `analysis_runs`: scan history, summary metrics, errors, and full `report_json`.
+- `visitor_events`: visits for pages/API routes with visitor cookie id, IP, user-agent, referrer, status, and linked user id when known.
+- `activity_logs`: auth/account/analysis actions with redacted JSON metadata.
+
+For local development, run PostgreSQL locally and set:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/aegis
+```
 
 ## Experimental local bridge
 
