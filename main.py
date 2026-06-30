@@ -53,6 +53,8 @@ LOG_STATIC_VISITS = os.getenv("AEGIS_LOG_STATIC_VISITS", "").strip().lower() in 
     "on",
 }
 MAX_LOG_VALUE_LENGTH = int(os.getenv("AEGIS_MAX_LOG_VALUE_LENGTH", "2000"))
+DB_DUMP_DEFAULT_ROW_LIMIT = int(os.getenv("AEGIS_DB_DUMP_DEFAULT_ROW_LIMIT", "0"))
+DB_DUMP_HARD_ROW_LIMIT = int(os.getenv("AEGIS_DB_DUMP_HARD_ROW_LIMIT", "0"))
 SESSION_TTL_DAYS = int(os.getenv("AEGIS_SESSION_TTL_DAYS", "30"))
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "caraxes88").strip()
@@ -635,6 +637,14 @@ SENSITIVE_LOG_KEYS = {
     "session",
     "token",
 }
+SENSITIVE_DB_COLUMN_NAMES = {
+    "google_sub",
+    "password_hash",
+    "password_salt",
+    "session_token_hash",
+    "token",
+}
+SENSITIVE_DB_COLUMN_MARKERS = ("password", "secret", "credential", "token")
 
 
 def clamp_log_value(value: Any, limit: int = MAX_LOG_VALUE_LENGTH) -> str:
@@ -1437,6 +1447,117 @@ def row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def is_sensitive_db_column(column: str) -> bool:
+    lowered = column.lower()
+    return lowered in SENSITIVE_DB_COLUMN_NAMES or any(
+        marker in lowered for marker in SENSITIVE_DB_COLUMN_MARKERS
+    )
+
+
+def redact_database_value(key: str, value: Any) -> Any:
+    if is_sensitive_db_column(key):
+        return "[redacted]" if value not in {"", None} else value
+    if isinstance(value, dict):
+        return {
+            str(item_key): redact_database_value(str(item_key), item)
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_database_value(key, item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_database_value(key, item) for item in value]
+    return value
+
+
+def redact_database_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: redact_database_value(key, value) for key, value in row.items()}
+
+
+def normalized_db_dump_limit(limit: int) -> int:
+    if limit < 0:
+        raise HTTPException(status_code=400, detail="Dump row limit cannot be negative.")
+    if DB_DUMP_HARD_ROW_LIMIT > 0 and (limit == 0 or limit > DB_DUMP_HARD_ROW_LIMIT):
+        return DB_DUMP_HARD_ROW_LIMIT
+    return limit
+
+
+def public_database_tables(connection: psycopg.Connection) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """
+    ).fetchall()
+    return [str(row["table_name"]) for row in rows]
+
+
+def database_table_columns(connection: psycopg.Connection, table: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        ORDER BY ordinal_position
+        """,
+        (table,),
+    ).fetchall()
+    return [
+        {
+            "name": row["column_name"],
+            "type": row["data_type"],
+            "nullable": row["is_nullable"] == "YES",
+            "default": row["column_default"] or "",
+            "redacted": is_sensitive_db_column(str(row["column_name"])),
+        }
+        for row in rows
+    ]
+
+
+def db_dump_order_clause(column_names: list[str]) -> str:
+    for column in ("id", "created_at", "started_at", "last_seen_at", "updated_at"):
+        if column in column_names:
+            return f" ORDER BY {sql_identifier(column)}"
+    return ""
+
+
+def db_dump_payload(limit: int = DB_DUMP_DEFAULT_ROW_LIMIT) -> dict[str, Any]:
+    row_limit = normalized_db_dump_limit(limit)
+    with DB_LOCK, db_connect() as connection:
+        tables: dict[str, Any] = {}
+        for table in public_database_tables(connection):
+            safe_table = sql_identifier(table)
+            columns = database_table_columns(connection, table)
+            column_names = [str(column["name"]) for column in columns]
+            count_row = connection.execute(
+                f"SELECT COUNT(*)::int AS row_count FROM {safe_table}"
+            ).fetchone()
+            row_count = int(count_row["row_count"] or 0)
+            order_clause = db_dump_order_clause(column_names)
+            limit_clause = " LIMIT %s" if row_limit else ""
+            params = (row_limit,) if row_limit else ()
+            rows = connection.execute(
+                f"SELECT * FROM {safe_table}{order_clause}{limit_clause}",
+                params,
+            ).fetchall()
+            tables[table] = {
+                "columns": columns,
+                "row_count": row_count,
+                "returned_rows": len(rows),
+                "truncated": bool(row_limit and row_count > len(rows)),
+                "rows": [redact_database_row(row_to_dict(row)) for row in rows],
+            }
+    return {
+        "generated_at": utc_now(),
+        "redaction": "Credential and session secret fields are redacted.",
+        "requested_row_limit": limit,
+        "effective_row_limit": row_limit,
+        "table_count": len(tables),
+        "tables": tables,
+    }
+
+
 ADMIN_SESSION_WINDOWS: dict[str, str] = {
     "day": "last_seen_at::timestamptz >= now() - interval '1 day'",
     "week": "last_seen_at::timestamptz >= now() - interval '7 days'",
@@ -1875,6 +1996,36 @@ def api_admin_dashboard(request: Request) -> dict[str, Any]:
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
     return admin_dashboard_payload()
+
+
+@app.get("/api/admin/db-dump")
+def api_admin_db_dump(
+    request: Request,
+    limit: int = DB_DUMP_DEFAULT_ROW_LIMIT,
+) -> dict[str, Any]:
+    user = require_user(request)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    payload = db_dump_payload(limit)
+    log_activity(
+        "admin",
+        "db_dump",
+        int(user["id"]),
+        request,
+        {
+            "table_count": payload["table_count"],
+            "tables": {
+                table: {
+                    "row_count": data["row_count"],
+                    "returned_rows": data["returned_rows"],
+                    "truncated": data["truncated"],
+                }
+                for table, data in payload["tables"].items()
+            },
+            "effective_row_limit": payload["effective_row_limit"],
+        },
+    )
+    return payload
 
 
 @app.post("/api/analyze/{run_id}/cancel")

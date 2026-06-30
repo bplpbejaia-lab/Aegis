@@ -2111,6 +2111,13 @@ button:disabled {
   letter-spacing: -0.02em;
 }
 
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .admin-section-heading h4 {
   font-size: 15px;
 }
@@ -2128,6 +2135,11 @@ button:disabled {
   background: var(--ink);
   color: #000;
   padding: 0 14px;
+}
+
+.admin-heading button:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .admin-summary {

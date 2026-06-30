@@ -33,6 +33,7 @@ const preorderMessage = document.querySelector("#preorder-message");
 const confirmAelyxPreorderButton = document.querySelector("#confirm-aegis-preorder");
 const adminDashboard = document.querySelector("#admin-dashboard");
 const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashboard");
+const downloadDbDumpButton = document.querySelector("#download-db-dump");
 const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
 const adminPreorders = document.querySelector("#admin-preorders");
@@ -227,6 +228,10 @@ accountPlanInput?.addEventListener("change", async () => {
 
 refreshAdminDashboardButton?.addEventListener("click", () => {
   loadAdminDashboard();
+});
+
+downloadDbDumpButton?.addEventListener("click", () => {
+  downloadAdminDbDump();
 });
 
 adminPeriodTabs.forEach((tab) => {
@@ -853,6 +858,34 @@ async function loadAdminDashboard() {
     if (adminSummary) {
       adminSummary.innerHTML = `<p class="admin-empty">${escapeHtml(error.message)}</p>`;
     }
+  }
+}
+
+async function downloadAdminDbDump() {
+  if (!currentUser?.is_admin || !downloadDbDumpButton) return;
+  const originalText = downloadDbDumpButton.textContent;
+  downloadDbDumpButton.disabled = true;
+  downloadDbDumpButton.textContent = "Preparing...";
+  try {
+    const data = await apiJson("/api/admin/db-dump?limit=0");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `aelyx-db-dump-${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showAuthMessage("Database dump downloaded.", false);
+  } catch (error) {
+    showAuthMessage(error.message, true);
+  } finally {
+    downloadDbDumpButton.disabled = false;
+    downloadDbDumpButton.textContent = originalText;
   }
 }
 
