@@ -4,11 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Aelyx Free Website Scan</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23121212'/%3E%3Ccircle cx='32' cy='32' r='22' fill='%231ed760'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial' font-size='30' font-weight='900' fill='%23041108'%3EA%3C/text%3E%3C/svg%3E"
-    />
-    <link rel="stylesheet" href="/static/styles.css?v=funnel-human-1" />
+    <link rel="icon" href="/static/assets/aelyx-mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/styles.css?v=human-dashboard-2" />
   </head>
   <body class="is-pristine">
     <div class="app-shell">
@@ -17,8 +14,8 @@
           <button class="profile-card" id="profile-card" type="button" aria-label="Open account">
             <span class="profile-avatar" id="profile-avatar" aria-hidden="true">A</span>
             <span class="profile-copy">
-              <strong id="profile-name">Guest session</strong>
-              <span id="profile-plan">Free scan ready</span>
+              <strong id="profile-name">Guest</strong>
+              <span id="profile-plan">Free ready</span>
             </span>
             <span class="profile-dot" aria-hidden="true"></span>
           </button>
@@ -37,20 +34,20 @@
           <div class="sidebar-library" aria-label="Aelyx workspace">
             <p>Workspace</p>
             <ol class="workspace-history" id="workspace-history">
-              <li class="workspace-empty">Create an account to save scans.</li>
+              <li class="workspace-empty">Sign in to save scans.</li>
             </ol>
           </div>
           <div class="sidebar-plan">
             <div class="sidebar-plan-copy">
-              <strong>Free scan</strong>
-              <span id="sidebar-quota">No account needed today</span>
+              <strong>Free</strong>
+              <span id="sidebar-quota">Ready today</span>
             </div>
             <button class="aegis-preorder-card" id="aegis-preorder-card" type="button">
               <span class="preorder-mark" aria-hidden="true">A</span>
               <span>
-                <em>Reserve your spot</em>
-                <strong>Pre-register for Aelyx</strong>
-                <small id="aegis-preorder-status">Click for launch perks</small>
+                <em>Reserve</em>
+                <strong>Aelyx early access</strong>
+                <small id="aegis-preorder-status">Launch perks</small>
               </span>
             </button>
           </div>
@@ -66,28 +63,28 @@
             <span>WAF</span>
           </div>
 
-          <p class="hero-kicker">Free website security scan</p>
-          <h1>Scan a site in seconds</h1>
-          <p class="hero-subtitle">Paste a URL, confirm you are allowed to scan it, and get a clean security report.</p>
+          <p class="hero-kicker">Free site scan</p>
+          <h1>Scan in seconds</h1>
+          <p class="hero-subtitle">Paste a URL. Confirm access. Get a clear report.</p>
 
           <form class="target-console" id="audit-form">
             <label class="input-label" for="target">Target URL</label>
             <div class="input-frame">
               <span class="input-prefix" aria-hidden="true">
-                <img src="/static/assets/aegis-fluffy-companion-256.png" alt="" />
+                <img src="/static/assets/aelyx-mark.svg" alt="" />
               </span>
               <input
                 id="target"
                 name="target"
                 type="text"
                 inputmode="url"
-                placeholder="website.com"
+                placeholder="site.com"
                 autocomplete="url"
                 required
               />
               <button type="submit" id="run-button">
                 <span class="button-mark" aria-hidden="true"></span>
-                <span id="run-label">Scan my website</span>
+                <span id="run-label">Scan</span>
               </button>
               <button type="button" id="stop-button" hidden>Stop</button>
             </div>
@@ -95,7 +92,7 @@
             <div class="console-meta">
               <label class="consent-row">
                 <input id="authorized" name="authorized" type="checkbox" required />
-                <span>I can scan this target</span>
+                <span>Allowed target</span>
               </label>
               <label class="engine-row" for="analysis-engine">
                 <span>Engine</span>
@@ -110,14 +107,14 @@
                 <span>Mode</span>
                 <span class="select-shell">
                   <select id="validation-mode" name="validation_mode">
-                    <option value="active">Active validation</option>
-                    <option value="proof" selected>Proof mode</option>
+                    <option value="active">Active</option>
+                    <option value="proof" selected>Proof</option>
                   </select>
                 </span>
               </label>
               <label class="consent-row proof-consent" id="proof-consent-row">
                 <input id="proof-authorized" name="proof_authorized" type="checkbox" checked />
-                <span>Authorize reversible proof</span>
+                <span>Proof OK</span>
               </label>
             </div>
           </form>
@@ -125,7 +122,7 @@
           <div class="agent-strip">
             <div>
               <strong id="agent-state">Ready</strong>
-              <span id="agent-detail">Proof scan is ready, no account needed.</span>
+              <span id="agent-detail">Proof scan ready.</span>
             </div>
             <span id="elapsed">0 ms</span>
           </div>
@@ -155,12 +152,12 @@
           <div class="work-heading">
             <div>
               <p class="kicker">Scan status</p>
-            <h2 id="work-status">Ready to scan</h2>
+            <h2 id="work-status">Ready</h2>
             </div>
             <span id="work-progress-label">0%</span>
           </div>
-          <p id="work-detail">Your free scan starts instantly. Create an account after to save history and refresh quota.</p>
-          <button class="work-cta" type="button" data-focus-target>Paste URL</button>
+          <p id="work-detail">Free scan. Saved history after sign-in.</p>
+          <button class="work-cta" type="button" data-focus-target>URL</button>
           <ol id="work-steps" class="work-steps" aria-label="Work steps">
             <li>Waiting for a URL</li>
           </ol>
@@ -171,8 +168,8 @@
             <li class="chat-message assistant intro-message">
               <span class="message-avatar" aria-hidden="true">A</span>
               <div class="message-body">
-                <p class="assistant-kicker">Aelyx report agent</p>
-                <p>Run a free scan first. Sign up only when you want saved history and a fresh quota.</p>
+                <p class="assistant-kicker">Aelyx agent</p>
+                <p>Run a scan. Save it after sign-in.</p>
               </div>
             </li>
           </ol>
@@ -184,7 +181,7 @@
           <span class="footer-logo" aria-hidden="true">A</span>
           <div>
             <strong>Aelyx</strong>
-            <p>Commercial contact and launch updates.</p>
+            <p>Contact and launch updates.</p>
           </div>
         </div>
         <nav class="footer-links" aria-label="Contact links">
@@ -208,7 +205,7 @@
         </nav>
         <div class="footer-status" aria-label="Service status">
           <span></span>
-          <strong>Pre-launch commercial channel</strong>
+          <strong>Pre-launch channel</strong>
         </div>
       </footer>
     </div>
@@ -220,7 +217,7 @@
         <div class="auth-copy">
           <p class="kicker">Aelyx account</p>
           <h2 id="auth-title">Save scans and refresh quota</h2>
-          <p>Create a free account after your first scan to get a fresh account quota and saved history.</p>
+          <p>Create a free account to save scans and refresh quota.</p>
         </div>
 
         <section class="auth-panel" id="auth-panel" aria-label="Account access">
@@ -288,7 +285,7 @@
               <span>Continue with Google</span>
             </button>
           </div>
-          <p id="auth-message" class="auth-message">Free scans work without an account. Sign up to save history.</p>
+          <p id="auth-message" class="auth-message">Free scan works without sign-in.</p>
         </section>
       </section>
     </div>
@@ -347,6 +344,13 @@
                 <span>queued / running</span>
               </div>
               <div id="admin-live-runs" class="admin-table"></div>
+            </article>
+            <article class="wide">
+              <div class="admin-section-heading">
+                <h4>Live humans</h4>
+                <span>distinct visitors / history</span>
+              </div>
+              <div id="admin-live-humans" class="admin-human-board"></div>
             </article>
             <article class="wide">
               <div class="admin-section-heading">
@@ -470,7 +474,7 @@
               <span>Passive evidence</span>
             </div>
             <div class="facts-panel" id="facts-panel">
-              <p class="panel-placeholder">DNS, HTTP, TLS, and page facts will land here.</p>
+              <p class="panel-placeholder">DNS, HTTP, TLS, and page facts land here.</p>
             </div>
           </section>
 
@@ -490,7 +494,7 @@
               <span>Hosting and edge hardening</span>
             </div>
             <div id="hosting-list" class="hosting-list scroll-area">
-              <p class="panel-placeholder">Recommendations will be generated after analysis.</p>
+              <p class="panel-placeholder">Fixes appear after analysis.</p>
             </div>
           </section>
 
@@ -500,7 +504,7 @@
               <span>Abuse scenarios</span>
             </div>
             <div id="impact-panel" class="impact-panel">
-              <p class="panel-placeholder">Impact visualization will appear after analysis.</p>
+              <p class="panel-placeholder">Impact appears after analysis.</p>
             </div>
           </section>
         </div>
@@ -519,7 +523,7 @@
         </div>
         <div class="thinking-copy">
           <p class="kicker">Live agent work</p>
-          <h2 id="thinking-title">Aelyx is thinking</h2>
+          <h2 id="thinking-title">Aelyx running</h2>
           <p id="thinking-detail">Preparing the run.</p>
         </div>
         <div class="thinking-stats">
@@ -540,6 +544,6 @@
     </div>
 
     <script src="https://accounts.google.com/gsi/client?hl=en" async defer></script>
-    <script src="/static/app.js?v=funnel-human-1"></script>
+    <script src="/static/app.js?v=human-dashboard-2"></script>
   </body>
 </html>

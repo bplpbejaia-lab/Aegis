@@ -38,6 +38,7 @@ const refreshAdminDashboardButton = document.querySelector("#refresh-admin-dashb
 const downloadDbDumpButton = document.querySelector("#download-db-dump");
 const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
+const adminLiveHumans = document.querySelector("#admin-live-humans");
 const adminPreorders = document.querySelector("#admin-preorders");
 const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
@@ -97,6 +98,7 @@ const thinkingStages = document.querySelector("#thinking-stages");
 const traceItems = new Map();
 const SESSION_KEY = "aegisSessionToken";
 const VISITOR_HEARTBEAT_MS = 20000;
+const ADMIN_REFRESH_MS = 15000;
 const ADMIN_PERIOD_LABELS = {
   day: "Rolling 24h",
   week: "Last 7 days",
@@ -118,6 +120,7 @@ let adminDashboardData = null;
 let adminSelectedPeriod = "day";
 let visitorStartedAt = Date.now();
 let visitorHeartbeatTimer = null;
+let adminRefreshTimer = null;
 let ctaViewedLogged = false;
 let signupOpenedLogged = false;
 
@@ -269,7 +272,7 @@ logoutButton?.addEventListener("click", async () => {
 
 googleFallback?.addEventListener("click", () => {
   if (!appConfig.google_client_id) {
-    showAuthMessage("Google sign-in is not configured. Add GOOGLE_CLIENT_ID in .env and restart Aelyx.", true);
+    showAuthMessage("Google sign-in is not configured.", true);
     return;
   }
   if (window.google?.accounts?.id && googleSignin && !googleButtonRendered) {
@@ -278,10 +281,10 @@ googleFallback?.addEventListener("click", () => {
   }
   if (window.google?.accounts?.id) {
     window.google.accounts.id.prompt();
-    showAuthMessage("Choose your Google account in the popup.", false);
+    showAuthMessage("Choose your Google account.", false);
     return;
   }
-  showAuthMessage("Google sign-in is still loading. Try again in a moment.", false);
+  showAuthMessage("Google sign-in is loading.", false);
 });
 
 openReportButton?.addEventListener("click", () => {
@@ -395,7 +398,7 @@ async function authenticate(endpoint, payload) {
     closeAuthModal();
     showAuthMessage(
       endpoint.includes("signup")
-        ? "Account created. Your saved quota starts fresh."
+        ? "Account created."
         : "Signed in.",
       false,
     );
@@ -534,7 +537,7 @@ function handleLockedSelectOption(select, shell) {
   syncCustomSelect(shell);
   closeCustomSelect(shell);
   if (select?.id === "analysis-engine") {
-    showError("Aelyx unlocks after account setup. Start with the free scan here.");
+    showError("Aelyx unlocks after account setup.");
   }
   if (currentUser) {
     openPreorderModal();
@@ -661,7 +664,8 @@ function renderSession() {
   if (!signedIn) {
     closeAccountModal();
     if (adminDashboard) adminDashboard.hidden = true;
-    showAuthMessage("Free scans work without an account. Sign up to save history.", false);
+    stopAdminDashboardRefresh();
+    showAuthMessage("Free scan works without sign-in.", false);
     loadAccountQuota();
     renderWorkspaceHistory([]);
     return;
@@ -677,12 +681,13 @@ function renderSession() {
   loadAccountQuota();
   loadWorkspaceHistory();
   if (currentUser.is_admin) loadAdminDashboard();
+  if (!currentUser.is_admin) stopAdminDashboardRefresh();
 }
 
 function renderProfileCard() {
   const signedIn = Boolean(currentUser);
-  const username = signedIn ? currentUser.username : "Guest scan";
-  const plan = currentUser?.is_admin ? "Unlimited admin" : currentUser?.plan?.label || "Free scan ready";
+  const username = signedIn ? currentUser.username : "Guest";
+  const plan = currentUser?.is_admin ? "Admin" : currentUser?.plan?.label || "Free ready";
   if (profileName) profileName.textContent = username;
   if (profilePlan) profilePlan.textContent = plan;
   if (profileAvatar) profileAvatar.textContent = (username || "A").slice(0, 1).toUpperCase();
@@ -693,18 +698,18 @@ function renderAelyxPreorderState() {
   const isRegistered = Boolean(currentUser?.aegis_waitlist_at);
   if (aegisPreorderStatus) {
     aegisPreorderStatus.textContent = isRegistered
-      ? "You are pre-registered"
-      : "Click to reserve launch perks";
+      ? "Reserved"
+      : "Launch perks";
   }
   aegisPreorderCard?.classList.toggle("is-registered", isRegistered);
   if (confirmAelyxPreorderButton) {
-    confirmAelyxPreorderButton.textContent = isRegistered ? "Already pre-registered" : "Pre-register Aelyx";
+    confirmAelyxPreorderButton.textContent = isRegistered ? "Reserved" : "Reserve Aelyx";
     confirmAelyxPreorderButton.disabled = isRegistered;
   }
   if (preorderMessage) {
     preorderMessage.textContent = isRegistered
-      ? "Aelyx early access is reserved for this account."
-      : "Current default remains sheepstealer.";
+      ? "Aelyx access is reserved."
+      : "Default: sheepstealer.";
     preorderMessage.classList.remove("error");
   }
 }
@@ -723,7 +728,7 @@ function renderQuotaSummary(summary) {
     const sheep = summary?.quotas?.sheepstealer;
     const quotaLabel = sheep ? `${sheep.remaining}/${sheep.limit} left` : "1 free scan";
     if (sidebarQuota) sidebarQuota.textContent = `Guest: ${quotaLabel} today`;
-    renderAccountQuotaCard("Guest quota", quotaLabel, "Create an account for a fresh saved quota.");
+    renderAccountQuotaCard("Guest quota", quotaLabel, "Sign in to save scans.");
     return;
   }
   if (currentUser.is_admin) {
@@ -772,7 +777,7 @@ async function loadWorkspaceHistory() {
 function renderWorkspaceHistory(runs) {
   if (!workspaceHistory) return;
   if (!currentUser) {
-    workspaceHistory.innerHTML = '<li class="workspace-empty">Create an account to save scan history.</li>';
+    workspaceHistory.innerHTML = '<li class="workspace-empty">Sign in to save scans.</li>';
     return;
   }
   if (!runs.length) {
@@ -820,7 +825,7 @@ function togglePasswordVisibility(toggle) {
 function openPreorderModal() {
   if (!currentUser) {
     openAuthModal("signup");
-    showAuthMessage("Create an account first, then pre-register Aelyx.", false);
+    showAuthMessage("Sign in first to reserve Aelyx.", false);
     return;
   }
   closeAuthModal();
@@ -891,20 +896,37 @@ function openAccountModal() {
   document.body.classList.add("modal-open");
   resetModalScroll(accountModal);
   accountPlanInput?.focus();
-  if (currentUser?.is_admin) loadAdminDashboard();
+  if (currentUser?.is_admin) {
+    loadAdminDashboard();
+    startAdminDashboardRefresh();
+  }
 }
 
 function closeAccountModal() {
   if (!accountModal) return;
   accountModal.hidden = true;
+  stopAdminDashboardRefresh();
   if (reportModal?.hidden !== false && authModal?.hidden !== false) {
     document.body.classList.remove("modal-open");
   }
 }
 
-async function loadAdminDashboard() {
+function startAdminDashboardRefresh() {
+  if (!currentUser?.is_admin || adminRefreshTimer) return;
+  adminRefreshTimer = window.setInterval(() => {
+    if (accountModal?.hidden === false) loadAdminDashboard({ silent: true });
+  }, ADMIN_REFRESH_MS);
+}
+
+function stopAdminDashboardRefresh() {
+  if (!adminRefreshTimer) return;
+  window.clearInterval(adminRefreshTimer);
+  adminRefreshTimer = null;
+}
+
+async function loadAdminDashboard({ silent = false } = {}) {
   if (!currentUser?.is_admin || !adminDashboard) return;
-  setAdminLoading();
+  if (!silent || !adminDashboardData) setAdminLoading();
   try {
     const data = await apiJson("/api/admin/dashboard");
     renderAdminDashboard(data);
@@ -934,7 +956,7 @@ async function downloadAdminDbDump() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    showAuthMessage("Database dump downloaded.", false);
+    showAuthMessage("DB dump downloaded.", false);
   } catch (error) {
     showAuthMessage(error.message, true);
   } finally {
@@ -946,6 +968,7 @@ async function downloadAdminDbDump() {
 function setAdminLoading() {
   if (adminSummary) adminSummary.innerHTML = '<p class="admin-empty">Loading dashboard...</p>';
   if (adminLiveRuns) adminLiveRuns.innerHTML = "";
+  if (adminLiveHumans) adminLiveHumans.innerHTML = "";
   if (adminPreorders) adminPreorders.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
   if (adminVisitors) adminVisitors.innerHTML = "";
@@ -967,16 +990,16 @@ function renderAdminDashboard(data) {
   if (adminSummary) {
     adminSummary.innerHTML = [
       ["Runs", summary.runs || 0],
-      ["Live runs", summary.live_runs || 0],
-      ["Accounts", summary.user_accounts || 0],
-      ["Pre-regs", summary.preorders || 0],
-      ["Human visitors", sessionStats.session_visitors || summary.unique_visitors || 0],
-      ["Human sessions", sessionStats.sessions || summary.visitor_sessions || 0],
-      ["Guest visitors", sessionStats.external_visitors || 0],
-      ["Avg time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
+      ["Live", summary.live_runs || 0],
+      ["Users", summary.user_accounts || 0],
+      ["Pre", summary.preorders || 0],
+      ["Humans", sessionStats.session_visitors || summary.unique_visitors || 0],
+      ["Visits", sessionStats.sessions || summary.visitor_sessions || 0],
+      ["Guests", sessionStats.external_visitors || 0],
+      ["Time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
       ["Engaged", sessionStats.engaged_sessions || 0],
-      ["Conversions", sessionStats.preorder_conversions || 0],
-      ["Noise filtered", summary.filtered_noise_sessions || 0],
+      ["Conv", sessionStats.preorder_conversions || 0],
+      ["Noise", summary.filtered_noise_sessions || 0],
     ]
       .map(
         ([label, value]) => `
@@ -1001,6 +1024,7 @@ function renderAdminDashboard(data) {
     ],
     "No live runs.",
   );
+  renderAdminHumanBoard(adminLiveHumans, visitors, insights.sessions || []);
   renderAdminTable(
     adminPreorders,
     dashboard.preorders || [],
@@ -1030,25 +1054,7 @@ function renderAdminDashboard(data) {
     ],
     "No run history yet.",
   );
-  renderAdminTable(
-    adminVisitors,
-    visitors,
-    ["Visitor ID", "Sessions", "Pages", "Time", "Region", "Device", "Source", "Landing", "Last path", "Seen", "Pre-reg"],
-    (visitor) => [
-      shortVisitorId(visitor.visitor_id),
-      visitor.sessions || 0,
-      visitor.page_views || 0,
-      formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000),
-      visitorRegion(visitor),
-      visitorDevice(visitor),
-      visitorSource(visitor),
-      compactPath(visitor.landing_path),
-      compactPath(visitor.last_path),
-      relativeTime(visitor.last_seen_at),
-      Number(visitor.converted_preorder || 0) ? "yes" : "no",
-    ],
-    "No visitors in this period.",
-  );
+  renderAdminVisitorCards(adminVisitors, visitors, insights.sessions || []);
   renderAdminTable(
     adminCampaigns,
     insights.campaigns || [],
@@ -1106,6 +1112,104 @@ function renderAdminDashboard(data) {
     ],
     "No visitor sessions in this period.",
   );
+}
+
+function renderAdminHumanBoard(container, visitors, sessions) {
+  if (!container) return;
+  visitors = Array.isArray(visitors) ? visitors : [];
+  const liveVisitors = visitors.filter(isLiveVisitor).slice(0, 8);
+  if (!liveVisitors.length) {
+    container.innerHTML = '<p class="admin-empty">No humans live right now.</p>';
+    return;
+  }
+  container.innerHTML = `
+    <div class="admin-live-strip">
+      ${liveVisitors.map((visitor) => renderAdminHumanCard(visitor, sessions, true)).join("")}
+    </div>
+  `;
+}
+
+function renderAdminVisitorCards(container, visitors, sessions) {
+  if (!container) return;
+  visitors = Array.isArray(visitors) ? visitors : [];
+  if (!visitors.length) {
+    container.innerHTML = '<p class="admin-empty">No visitors in this period.</p>';
+    return;
+  }
+  container.innerHTML = `
+    <div class="admin-visitor-grid">
+      ${visitors.slice(0, 24).map((visitor) => renderAdminHumanCard(visitor, sessions, false)).join("")}
+    </div>
+  `;
+}
+
+function renderAdminHumanCard(visitor, sessions, compact = false) {
+  const live = isLiveVisitor(visitor);
+  const history = visitorHistoryItems(visitor, sessions, compact ? 2 : 3);
+  return `
+    <article class="admin-human-card ${live ? "is-live" : ""}">
+      <div class="admin-human-top">
+        <span class="admin-human-avatar" aria-hidden="true">${escapeHtml(visitorAvatarLabel(visitor))}</span>
+        <div>
+          <strong>${escapeHtml(shortVisitorId(visitor.visitor_id))}</strong>
+          <span>${escapeHtml(live ? "Live now" : `Seen ${relativeTime(visitor.last_seen_at)}`)}</span>
+        </div>
+        <i>${escapeHtml(visitorEntryLabel(visitor))}</i>
+      </div>
+      <div class="admin-human-meta">
+        <span>${escapeHtml(visitor.sessions || 0)} sessions</span>
+        <span>${escapeHtml(visitor.page_views || 0)} pages</span>
+        <span>${escapeHtml(formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000))}</span>
+      </div>
+      <dl class="admin-human-details">
+        <div><dt>Where</dt><dd>${escapeHtml(visitorRegion(visitor))}</dd></div>
+        <div><dt>Device</dt><dd>${escapeHtml(visitorDevice(visitor))}</dd></div>
+        <div><dt>Source</dt><dd>${escapeHtml(visitorSource(visitor))}</dd></div>
+      </dl>
+      <ol class="admin-human-history">
+        ${history.map((item) => `
+          <li>
+            <strong>${escapeHtml(compactPath(item.landing_path))}</strong>
+            <span>${escapeHtml(compactPath(item.last_path))} / ${escapeHtml(relativeTime(item.last_seen_at))}</span>
+          </li>
+        `).join("")}
+      </ol>
+    </article>
+  `;
+}
+
+function isLiveVisitor(visitor) {
+  const date = new Date(visitor?.last_seen_at || "");
+  if (Number.isNaN(date.getTime())) return false;
+  return Date.now() - date.getTime() <= VISITOR_HEARTBEAT_MS * 4.5;
+}
+
+function visitorAvatarLabel(visitor) {
+  const country = String(visitor?.country || "").trim();
+  if (country) return country.slice(0, 2).toUpperCase();
+  const text = String(visitor?.visitor_id || "H").replace(/[^a-z0-9]/gi, "");
+  return (text.slice(0, 2) || "H").toUpperCase();
+}
+
+function visitorEntryLabel(visitor) {
+  if (!visitor?.first_seen_at) return "new";
+  return `joined ${relativeTime(visitor.first_seen_at)}`;
+}
+
+function visitorHistoryItems(visitor, sessions, limit) {
+  const visitorId = visitor?.visitor_id || "";
+  const rows = (Array.isArray(sessions) ? sessions : [])
+    .filter((session) => session.visitor_id === visitorId)
+    .sort((left, right) => new Date(right.last_seen_at || 0) - new Date(left.last_seen_at || 0))
+    .slice(0, limit);
+  if (rows.length) return rows;
+  return [
+    {
+      landing_path: visitor?.landing_path || "/",
+      last_path: visitor?.last_path || "/",
+      last_seen_at: visitor?.last_seen_at || "",
+    },
+  ];
 }
 
 function renderAdminTable(container, rows, headings, rowMapper, emptyText) {
@@ -1305,7 +1409,7 @@ async function runAnalysis() {
     proof_authorized: proofAuthorized,
   });
   if (selectedEngine === "aegis" && isAelyxEngineLocked()) {
-    showError("Aelyx unlocks after account setup. Start with the free scan here.");
+    showError("Aelyx unlocks after account setup.");
     if (currentUser) {
       openPreorderModal();
     } else {
@@ -1314,7 +1418,7 @@ async function runAnalysis() {
     return;
   }
   if (validationMode === "proof" && !proofAuthorized) {
-    showError("Proof mode requires separate reversible-proof authorization.");
+    showError("Proof mode needs proof OK.");
     proofAuthorizedInput?.focus();
     return;
   }
@@ -1331,9 +1435,9 @@ async function runAnalysis() {
   if (stopButton) stopButton.hidden = false;
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
-  agentDetail.textContent = "Preparing Aelyx tools.";
+  agentDetail.textContent = "Preparing tools.";
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing Aelyx tools.";
+  workDetail.textContent = "Preparing tools.";
   showThinkingModal(target, selectedEngine);
 
   try {
@@ -1386,7 +1490,7 @@ async function runAnalysis() {
     runButton.classList.remove("is-running");
     if (stopButton) stopButton.hidden = true;
     currentRunController = null;
-    runLabel.textContent = "Scan my website";
+    runLabel.textContent = "Scan";
     window.clearInterval(timer);
     updateElapsed();
   }
@@ -1498,19 +1602,19 @@ function resetRun(target) {
     <li class="chat-message assistant intro-message">
       <span class="message-avatar" aria-hidden="true">A</span>
       <div class="message-body">
-        <p class="assistant-kicker">Aelyx research agent</p>
-        <p>Starting the live reasoning stream. Aelyx tools will appear here as they run.</p>
+        <p class="assistant-kicker">Aelyx agent</p>
+        <p>Live scan started.</p>
       </div>
     </li>
   `;
 
   factsPanel.innerHTML =
-    '<p class="panel-placeholder">DNS, HTTP, TLS, and page facts will land here.</p>';
+    '<p class="panel-placeholder">DNS, HTTP, TLS, and page facts land here.</p>';
   findingsList.innerHTML = '<p class="panel-placeholder">No findings yet.</p>';
   hostingList.innerHTML =
-    '<p class="panel-placeholder">Recommendations will be generated after analysis.</p>';
+    '<p class="panel-placeholder">Fixes appear after analysis.</p>';
   if (impactPanel) {
-    impactPanel.innerHTML = '<p class="panel-placeholder">Impact visualization will appear after analysis.</p>';
+    impactPanel.innerHTML = '<p class="panel-placeholder">Impact appears after analysis.</p>';
   }
   renderMetrics({
     score: 0,
@@ -1557,7 +1661,7 @@ function renderStep(step) {
 
 function resetWorkBoard() {
   workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing Aelyx tools.";
+  workDetail.textContent = "Preparing tools.";
   workProgressLabel.textContent = "0%";
   workSteps.innerHTML = "";
 }
@@ -1588,8 +1692,8 @@ function showThinkingModal(target, engine) {
   thinkingTarget.textContent = target || "-";
   thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aelyx";
   thinkingQuota.textContent = "checking";
-  thinkingTitle.textContent = "Aelyx is thinking";
-  thinkingDetail.textContent = "Preparing the run.";
+  thinkingTitle.textContent = "Aelyx running";
+  thinkingDetail.textContent = "Preparing.";
   thinkingProgressBar?.style.setProperty("--thinking-progress", "8%");
   setThinkingStage(0);
 }
@@ -1761,9 +1865,9 @@ function directEngineName(report) {
 }
 
 function validationModeLabel(mode) {
-  if (mode === "proof") return "Proof mode";
-  if (mode === "active") return "Active validation";
-  return "Proof mode";
+  if (mode === "proof") return "Proof";
+  if (mode === "active") return "Active";
+  return "Proof";
 }
 
 function parseDirectReport(raw) {
@@ -2330,16 +2434,16 @@ function renderEmptyReport() {
     final_url: "",
     status_code: "",
   });
-  summaryLine.textContent = "No target has been scanned yet.";
+  summaryLine.textContent = "No scan yet.";
   factsPanel.innerHTML = `
     <div class="empty-report report-searchable">
-      <h3>No report yet</h3>
-      <p>Scan an authorized target to populate DNS, TLS, WordPress, headers, findings, and hosting recommendations.</p>
-      <button type="button" data-focus-target>Scan a target</button>
+      <h3>No report</h3>
+      <p>Scan an authorized target to see DNS, TLS, headers, findings, and fixes.</p>
+      <button type="button" data-focus-target>Scan</button>
     </div>
   `;
-  findingsList.innerHTML = '<p class="panel-placeholder">Findings will appear after the first scan.</p>';
-  hostingList.innerHTML = '<p class="panel-placeholder">Architecture recommendations will appear after analysis.</p>';
+  findingsList.innerHTML = '<p class="panel-placeholder">Findings appear after scan.</p>';
+  hostingList.innerHTML = '<p class="panel-placeholder">Fixes appear after analysis.</p>';
   renderImpactPanel([]);
   if (reportSearchInput) reportSearchInput.value = "";
   filterReport("");
@@ -2472,7 +2576,7 @@ function showError(message) {
     stopButton.disabled = false;
     stopButton.textContent = "Stop";
   }
-  runLabel.textContent = "Scan my website";
+  runLabel.textContent = "Scan";
   window.clearInterval(timer);
   scrollChatToBottom();
 }
