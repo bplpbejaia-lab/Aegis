@@ -128,7 +128,7 @@ class AnalysisRequest(BaseModel):
     target: str = Field(..., min_length=3, max_length=2048)
     authorized: bool = False
     engine: str = "aegis"
-    validation_mode: str = "safe"
+    validation_mode: str = "proof"
     proof_authorized: bool = False
     client_run_id: str = Field(default="", max_length=64)
 
@@ -2204,12 +2204,6 @@ async def run_analysis(
                 },
             )
             return
-        if not auth_context and validation_mode != "safe":
-            yield event(
-                "error",
-                {"message": "Guest scans use safe analysis. Create an account for validation modes."},
-            )
-            return
         if selected_engine == "aegis" and (
             not auth_context or not has_aegis_plan_access(auth_context)
         ):
@@ -2218,19 +2212,6 @@ async def run_analysis(
                 {
                     "message": (
                         "Aelyx engine is reserved for paid Aelyx users. "
-                        "Pre-register for Aelyx early access first."
-                    )
-                },
-            )
-            return
-        if validation_mode == "proof" and not (
-            auth_context and PROOF_MODE_LAUNCHED and has_aegis_plan_access(auth_context)
-        ):
-            yield event(
-                "error",
-                {
-                    "message": (
-                        "Proof mode is reserved for Aelyx users after launch. "
                         "Pre-register for Aelyx early access first."
                     )
                 },
@@ -2669,12 +2650,12 @@ def normalize_analysis_engine(raw_engine: str) -> str:
 
 
 def normalize_validation_mode(raw_mode: str) -> str:
-    mode = str(raw_mode or "safe").strip().lower()
+    mode = str(raw_mode or "proof").strip().lower()
     if mode in {"active", "active_validation", "validate"}:
         return "active"
     if mode in {"proof", "proof_mode", "poc"}:
         return "proof"
-    return "safe"
+    return "proof"
 
 
 def normalize_target(raw_target: str) -> str:

@@ -8,6 +8,8 @@ const proofConsentRow = document.querySelector("#proof-consent-row");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
 const stopButton = document.querySelector("#stop-button");
+const menuToggle = document.querySelector("#menu-toggle");
+const mobileMenu = document.querySelector("#mobile-menu");
 const authPanel = document.querySelector("#auth-panel");
 const authModal = document.querySelector("#auth-modal");
 const accountModal = document.querySelector("#account-modal");
@@ -143,6 +145,12 @@ stopButton?.addEventListener("click", () => {
   stopCurrentRun();
 });
 
+menuToggle?.addEventListener("click", () => {
+  const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
+  menuToggle.setAttribute("aria-expanded", String(!isOpen));
+  mobileMenu?.classList.toggle("is-open", !isOpen);
+});
+
 validationModeInput?.addEventListener("change", updateProofConsentVisibility);
 
 sessionButton?.addEventListener("click", () => {
@@ -208,7 +216,7 @@ signupForm?.addEventListener("submit", async (event) => {
   await authenticate("/api/auth/signup", {
     username: formData.get("username"),
     password: formData.get("password"),
-    plan: signupPlanInput?.value || "sheepstealer_daily",
+    plan: signupPlanInput?.value || "free",
   });
 });
 
@@ -280,6 +288,8 @@ openReportButton?.addEventListener("click", () => {
 
 navActions.forEach((action) => {
   action.addEventListener("click", () => {
+    menuToggle?.setAttribute("aria-expanded", "false");
+    mobileMenu?.classList.remove("is-open");
     const target = action.dataset.navTarget;
     if (target === "work") scrollToWork();
     if (target === "live") scrollToLive();
@@ -467,7 +477,7 @@ function hasAelyxPlanAccess() {
 }
 
 function isProofModeLocked() {
-  return !(appConfig.proof_mode_launched && hasAelyxPlanAccess());
+  return false;
 }
 
 function isAelyxEngineLocked() {
@@ -476,8 +486,6 @@ function isAelyxEngineLocked() {
 
 function isLockedSelectOption(select, value) {
   if (!select) return false;
-  if (select.id === "validation-mode" && value !== "safe" && !currentUser) return true;
-  if (select.id === "validation-mode" && value === "proof") return isProofModeLocked();
   if (select.id === "analysis-engine" && value === "aegis") return isAelyxEngineLocked();
   return false;
 }
@@ -487,8 +495,6 @@ function handleLockedSelectOption(select, shell) {
   closeCustomSelect(shell);
   if (select?.id === "analysis-engine") {
     showError("Aelyx unlocks after account setup. Start with the free scan here.");
-  } else if (select?.id === "validation-mode") {
-    showError("Guest scans use safe analysis. Create an account for validation modes.");
   }
   if (currentUser) {
     openPreorderModal();
@@ -500,14 +506,6 @@ function handleLockedSelectOption(select, shell) {
 function enforceLockedSelections() {
   if (analysisEngineInput?.value === "aegis" && isAelyxEngineLocked()) {
     analysisEngineInput.value = "sheepstealer";
-  }
-  if (!currentUser && validationModeInput?.value !== "safe") {
-    validationModeInput.value = "safe";
-    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
-  }
-  if (validationModeInput?.value === "proof" && isProofModeLocked()) {
-    validationModeInput.value = "safe";
-    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
   }
   syncAllCustomSelects();
   updateProofConsentVisibility();
@@ -754,7 +752,7 @@ function renderWorkspaceHistory(runs) {
             type="button"
             data-workspace-target="${escapeHtml(target)}"
             data-workspace-engine="${escapeHtml(run.engine || "sheepstealer")}"
-            data-workspace-mode="${escapeHtml(run.validation_mode || "safe")}"
+            data-workspace-mode="${escapeHtml(run.validation_mode || "proof")}"
           >
             <span class="workspace-dot status-${escapeHtml(status)}"></span>
             <span class="workspace-copy">
@@ -1213,15 +1211,9 @@ function initializeGoogleSignIn() {
 async function runAnalysis() {
   const target = normalizeTargetInput(targetInput.value);
   const selectedEngine = analysisEngineInput?.value || "sheepstealer";
-  let validationMode = validationModeInput?.value || "safe";
+  let validationMode = validationModeInput?.value || "proof";
+  if (!["active", "proof"].includes(validationMode)) validationMode = "proof";
   let proofAuthorized = Boolean(proofAuthorizedInput?.checked);
-  if (!currentUser && validationMode !== "safe") {
-    validationMode = "safe";
-    proofAuthorized = false;
-    if (validationModeInput) validationModeInput.value = "safe";
-    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
-    syncAllCustomSelects();
-  }
   if (selectedEngine === "aegis" && isAelyxEngineLocked()) {
     showError("Aelyx unlocks after account setup. Start with the free scan here.");
     if (currentUser) {
@@ -1229,11 +1221,6 @@ async function runAnalysis() {
     } else {
       openAuthModal("signup");
     }
-    return;
-  }
-  if (validationMode === "proof" && isProofModeLocked()) {
-    showError("Proof mode is reserved for Aelyx users after launch.");
-    openPreorderModal();
     return;
   }
   if (validationMode === "proof" && !proofAuthorized) {
@@ -1354,13 +1341,9 @@ function markRunStopped() {
 }
 
 function updateProofConsentVisibility() {
-  if (validationModeInput?.value === "proof" && isProofModeLocked()) {
-    validationModeInput.value = "safe";
-    syncCustomSelect(validationModeInput.closest(".select-shell"));
-  }
   const isProofMode = validationModeInput?.value === "proof";
   if (proofConsentRow) proofConsentRow.hidden = !isProofMode;
-  if (!isProofMode && proofAuthorizedInput) proofAuthorizedInput.checked = false;
+  if (proofAuthorizedInput) proofAuthorizedInput.checked = isProofMode;
 }
 
 function handleEvent(message) {
@@ -1690,7 +1673,7 @@ function directEngineName(report) {
 function validationModeLabel(mode) {
   if (mode === "proof") return "Proof mode";
   if (mode === "active") return "Active validation";
-  return "Safe analysis";
+  return "Proof mode";
 }
 
 function parseDirectReport(raw) {
