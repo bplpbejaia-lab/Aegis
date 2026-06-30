@@ -376,7 +376,12 @@ async function authenticate(endpoint, payload) {
     currentUser = data.user;
     renderSession();
     closeAuthModal();
-    showAuthMessage("Signed in.", false);
+    showAuthMessage(
+      endpoint.includes("signup")
+        ? "Account created. Your saved quota starts fresh."
+        : "Signed in.",
+      false,
+    );
   } catch (error) {
     showAuthMessage(error.message, true);
   }
@@ -443,8 +448,8 @@ function renderPlanOptions() {
     .join("");
   if (signupPlanInput) {
     signupPlanInput.innerHTML = optionHtml;
-    signupPlanInput.value = plans.some((plan) => plan.id === "sheepstealer_daily")
-      ? "sheepstealer_daily"
+    signupPlanInput.value = plans.some((plan) => plan.id === "free")
+      ? "free"
       : plans[0]?.id || "free";
   }
   if (accountPlanInput) accountPlanInput.innerHTML = optionHtml;
@@ -471,6 +476,7 @@ function isAelyxEngineLocked() {
 
 function isLockedSelectOption(select, value) {
   if (!select) return false;
+  if (select.id === "validation-mode" && value !== "safe" && !currentUser) return true;
   if (select.id === "validation-mode" && value === "proof") return isProofModeLocked();
   if (select.id === "analysis-engine" && value === "aegis") return isAelyxEngineLocked();
   return false;
@@ -480,14 +486,24 @@ function handleLockedSelectOption(select, shell) {
   syncCustomSelect(shell);
   closeCustomSelect(shell);
   if (select?.id === "analysis-engine") {
-    showError("Aelyx engine is reserved for paid Aelyx users.");
+    showError("Aelyx unlocks after account setup. Start with the free scan here.");
+  } else if (select?.id === "validation-mode") {
+    showError("Guest scans use safe analysis. Create an account for validation modes.");
   }
-  openPreorderModal();
+  if (currentUser) {
+    openPreorderModal();
+  } else {
+    openAuthModal("signup");
+  }
 }
 
 function enforceLockedSelections() {
   if (analysisEngineInput?.value === "aegis" && isAelyxEngineLocked()) {
     analysisEngineInput.value = "sheepstealer";
+  }
+  if (!currentUser && validationModeInput?.value !== "safe") {
+    validationModeInput.value = "safe";
+    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
   }
   if (validationModeInput?.value === "proof" && isProofModeLocked()) {
     validationModeInput.value = "safe";
@@ -598,7 +614,7 @@ function renderSession() {
   if (sessionButton) {
     sessionButton.textContent = signedIn
       ? `${currentUser.username}${currentUser.is_admin ? " / admin" : ""}`
-      : "Sign in";
+      : "Account";
     sessionButton.classList.toggle("is-authenticated", signedIn);
   }
   renderProfileCard();
@@ -607,9 +623,8 @@ function renderSession() {
   if (!signedIn) {
     closeAccountModal();
     if (adminDashboard) adminDashboard.hidden = true;
-    showAuthMessage("Use your workspace account to continue.", false);
-    currentQuotaSummary = null;
-    renderQuotaSummary(null);
+    showAuthMessage("Free scans work without an account. Sign up to save history.", false);
+    loadAccountQuota();
     renderWorkspaceHistory([]);
     return;
   }
@@ -628,8 +643,8 @@ function renderSession() {
 
 function renderProfileCard() {
   const signedIn = Boolean(currentUser);
-  const username = signedIn ? currentUser.username : "Guest session";
-  const plan = currentUser?.is_admin ? "Unlimited admin" : currentUser?.plan?.label || "Pre-registration";
+  const username = signedIn ? currentUser.username : "Guest scan";
+  const plan = currentUser?.is_admin ? "Unlimited admin" : currentUser?.plan?.label || "Free scan ready";
   if (profileName) profileName.textContent = username;
   if (profilePlan) profilePlan.textContent = plan;
   if (profileAvatar) profileAvatar.textContent = (username || "A").slice(0, 1).toUpperCase();
@@ -657,7 +672,6 @@ function renderAelyxPreorderState() {
 }
 
 async function loadAccountQuota() {
-  if (!currentUser) return;
   try {
     currentQuotaSummary = await apiJson("/api/account/quota");
     renderQuotaSummary(currentQuotaSummary);
@@ -668,8 +682,10 @@ async function loadAccountQuota() {
 
 function renderQuotaSummary(summary) {
   if (!currentUser) {
-    if (sidebarQuota) sidebarQuota.textContent = "Default access: sheepstealer";
-    renderAccountQuotaCard("Quota left", "Sign in to view", "Pre-registration uses sheepstealer by default.");
+    const sheep = summary?.quotas?.sheepstealer;
+    const quotaLabel = sheep ? `${sheep.remaining}/${sheep.limit} left` : "1 free scan";
+    if (sidebarQuota) sidebarQuota.textContent = `Guest: ${quotaLabel} today`;
+    renderAccountQuotaCard("Guest quota", quotaLabel, "Create an account for a fresh saved quota.");
     return;
   }
   if (currentUser.is_admin) {
@@ -718,7 +734,7 @@ async function loadWorkspaceHistory() {
 function renderWorkspaceHistory(runs) {
   if (!workspaceHistory) return;
   if (!currentUser) {
-    workspaceHistory.innerHTML = '<li class="workspace-empty">Sign in to see recent scans.</li>';
+    workspaceHistory.innerHTML = '<li class="workspace-empty">Create an account to save scan history.</li>';
     return;
   }
   if (!runs.length) {
@@ -1195,18 +1211,24 @@ function initializeGoogleSignIn() {
 }
 
 async function runAnalysis() {
-  if (!currentUser) {
-    showError("Sign in or create an account before running Aelyx.");
-    openAuthModal("login");
-    return;
-  }
   const target = normalizeTargetInput(targetInput.value);
   const selectedEngine = analysisEngineInput?.value || "sheepstealer";
-  const validationMode = validationModeInput?.value || "safe";
-  const proofAuthorized = Boolean(proofAuthorizedInput?.checked);
+  let validationMode = validationModeInput?.value || "safe";
+  let proofAuthorized = Boolean(proofAuthorizedInput?.checked);
+  if (!currentUser && validationMode !== "safe") {
+    validationMode = "safe";
+    proofAuthorized = false;
+    if (validationModeInput) validationModeInput.value = "safe";
+    if (proofAuthorizedInput) proofAuthorizedInput.checked = false;
+    syncAllCustomSelects();
+  }
   if (selectedEngine === "aegis" && isAelyxEngineLocked()) {
-    showError("Aelyx engine is reserved for paid Aelyx users.");
-    openPreorderModal();
+    showError("Aelyx unlocks after account setup. Start with the free scan here.");
+    if (currentUser) {
+      openPreorderModal();
+    } else {
+      openAuthModal("signup");
+    }
     return;
   }
   if (validationMode === "proof" && isProofModeLocked()) {
@@ -1287,7 +1309,7 @@ async function runAnalysis() {
     runButton.classList.remove("is-running");
     if (stopButton) stopButton.hidden = true;
     currentRunController = null;
-    runLabel.textContent = "Analyze";
+    runLabel.textContent = "Scan free";
     window.clearInterval(timer);
     updateElapsed();
   }
@@ -1304,12 +1326,14 @@ async function stopCurrentRun() {
   agentDetail.textContent = "Cancelling the active analysis.";
   workStatus.textContent = "Stopping";
   workDetail.textContent = "Cancelling the active analysis.";
-  try {
-    await apiJson(`/api/analyze/${encodeURIComponent(currentRunId)}/cancel`, {
-      method: "POST",
-    });
-  } catch (error) {
-    appendErrorMessage(error.message);
+  if (currentUser) {
+    try {
+      await apiJson(`/api/analyze/${encodeURIComponent(currentRunId)}/cancel`, {
+        method: "POST",
+      });
+    } catch (error) {
+      appendErrorMessage(error.message);
+    }
   }
   currentRunController?.abort();
   markRunStopped();
@@ -2375,7 +2399,7 @@ function showError(message) {
     stopButton.disabled = false;
     stopButton.textContent = "Stop";
   }
-  runLabel.textContent = "Analyze";
+  runLabel.textContent = "Scan free";
   window.clearInterval(timer);
   scrollChatToBottom();
 }

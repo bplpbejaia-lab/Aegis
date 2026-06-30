@@ -3,12 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Aelyx Security Console</title>
+    <title>Aelyx Free Website Scan</title>
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23121212'/%3E%3Ccircle cx='32' cy='32' r='22' fill='%231ed760'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial' font-size='30' font-weight='900' fill='%23041108'%3EA%3C/text%3E%3C/svg%3E"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=mobile-polish-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=white-easy-scan-1" />
   </head>
   <body class="is-pristine">
     <div class="app-shell">
@@ -18,25 +18,25 @@
             <span class="profile-avatar" id="profile-avatar" aria-hidden="true">A</span>
             <span class="profile-copy">
               <strong id="profile-name">Guest session</strong>
-              <span id="profile-plan">Pre-registration</span>
+              <span id="profile-plan">Free scan ready</span>
             </span>
             <span class="profile-dot" aria-hidden="true"></span>
           </button>
           <div class="nav-pills">
-            <button class="session-pill" id="session-button" type="button">Sign in</button>
-            <button class="nav-action" type="button" data-nav-target="work">Work</button>
+            <button class="session-pill" id="session-button" type="button">Account</button>
+            <button class="nav-action" type="button" data-nav-target="work">Status</button>
             <button class="nav-action" id="open-report" type="button">Report</button>
           </div>
           <div class="sidebar-library" aria-label="Aelyx workspace">
             <p>Workspace</p>
             <ol class="workspace-history" id="workspace-history">
-              <li class="workspace-empty">Sign in to see recent scans.</li>
+              <li class="workspace-empty">Create an account to save scans.</li>
             </ol>
           </div>
           <div class="sidebar-plan">
             <div class="sidebar-plan-copy">
-              <strong>Premium engine</strong>
-              <span id="sidebar-quota">Default access: sheepstealer</span>
+              <strong>Free scan</strong>
+              <span id="sidebar-quota">No account needed today</span>
             </div>
             <button class="aegis-preorder-card" id="aegis-preorder-card" type="button">
               <span class="preorder-mark" aria-hidden="true">A</span>
@@ -59,9 +59,9 @@
             <span>WAF</span>
           </div>
 
-          <p class="hero-kicker">Autonomous security console</p>
-          <h1>Introducing Aelyx</h1>
-          <p class="hero-subtitle">Authorize a target, pick an engine, and let Aelyx classify the evidence.</p>
+          <p class="hero-kicker">Free website security scan</p>
+          <h1>Scan a site in seconds</h1>
+          <p class="hero-subtitle">Paste a URL, confirm you are allowed to scan it, and get a clean security report.</p>
 
           <form class="target-console" id="audit-form">
             <label class="input-label" for="target">Target URL</label>
@@ -74,13 +74,13 @@
                 name="target"
                 type="text"
                 inputmode="url"
-                placeholder="https://target.com"
+                placeholder="example.com"
                 autocomplete="url"
                 required
               />
               <button type="submit" id="run-button">
                 <span class="button-mark" aria-hidden="true"></span>
-                <span id="run-label">Analyze</span>
+                <span id="run-label">Scan free</span>
               </button>
               <button type="button" id="stop-button" hidden>Stop</button>
             </div>
@@ -88,7 +88,7 @@
             <div class="console-meta">
               <label class="consent-row">
                 <input id="authorized" name="authorized" type="checkbox" required />
-                <span>Authorized scope</span>
+                <span>I can scan this target</span>
               </label>
               <label class="engine-row" for="analysis-engine">
                 <span>Engine</span>
@@ -118,8 +118,8 @@
 
           <div class="agent-strip">
             <div>
-              <strong id="agent-state">Idle</strong>
-              <span id="agent-detail">Waiting for an authorized target.</span>
+              <strong id="agent-state">Ready</strong>
+              <span id="agent-detail">Free safe scan, no account needed.</span>
             </div>
             <span id="elapsed">0 ms</span>
           </div>
@@ -129,18 +129,18 @@
           <div class="capability-grid" aria-label="Aelyx capabilities">
             <article>
               <span>01</span>
-              <strong>Recon</strong>
-              <p>HTTP, TLS, DNS, exposed stack signals.</p>
+              <strong>Paste</strong>
+              <p>Start from any domain you are allowed to test.</p>
             </article>
             <article>
               <span>02</span>
-              <strong>Classify</strong>
-              <p>Critical, high, medium, and low evidence.</p>
+              <strong>Scan</strong>
+              <p>Safe checks cover web, DNS, TLS, and headers.</p>
             </article>
             <article>
               <span>03</span>
-              <strong>Report</strong>
-              <p>Readable findings with impact and fixes.</p>
+              <strong>Fix</strong>
+              <p>Get prioritized findings and next actions.</p>
             </article>
           </div>
         </section>
@@ -148,15 +148,15 @@
         <section class="work-board" id="work-board" aria-label="Work state">
           <div class="work-heading">
             <div>
-              <p class="kicker">Work state</p>
-            <h2 id="work-status">No active run</h2>
+              <p class="kicker">Scan status</p>
+            <h2 id="work-status">Ready to scan</h2>
             </div>
             <span id="work-progress-label">0%</span>
           </div>
-          <p id="work-detail">Scan an authorized target to see the agent tools, progress, and final handoff state.</p>
-          <button class="work-cta" type="button" data-focus-target>Scan a target</button>
+          <p id="work-detail">Your free scan starts instantly. Create an account after to save history and refresh quota.</p>
+          <button class="work-cta" type="button" data-focus-target>Paste URL</button>
           <ol id="work-steps" class="work-steps" aria-label="Work steps">
-            <li>Waiting for scope confirmation</li>
+            <li>Waiting for a URL</li>
           </ol>
         </section>
 
@@ -165,8 +165,8 @@
             <li class="chat-message assistant intro-message">
               <span class="message-avatar" aria-hidden="true">A</span>
               <div class="message-body">
-                <p class="assistant-kicker">Aelyx research agent</p>
-                <p>Submit an authorized target. Aelyx tools will appear here live.</p>
+                <p class="assistant-kicker">Aelyx report agent</p>
+                <p>Run a free scan first. Sign up only when you want saved history and a fresh quota.</p>
               </div>
             </li>
           </ol>
@@ -213,8 +213,8 @@
         <button class="auth-close" type="button" data-close-auth aria-label="Close">x</button>
         <div class="auth-copy">
           <p class="kicker">Aelyx account</p>
-          <h2 id="auth-title">Sign in to continue</h2>
-          <p>Use your account before starting an assessment.</p>
+          <h2 id="auth-title">Save scans and refresh quota</h2>
+          <p>Create a free account after your first scan to get a fresh account quota and saved history.</p>
         </div>
 
         <section class="auth-panel" id="auth-panel" aria-label="Account access">
@@ -264,7 +264,7 @@
               <span>Plan</span>
               <select name="plan" id="signup-plan"></select>
             </label>
-            <p class="signup-note">Pre-registration access is enabled. New users start on sheepstealer by default; payment opens at launch.</p>
+            <p class="signup-note">New accounts start on the Free plan with a fresh daily scan quota.</p>
             <button type="submit">Create account</button>
           </form>
 
@@ -282,7 +282,7 @@
               <span>Continue with Google</span>
             </button>
           </div>
-          <p id="auth-message" class="auth-message">Use your workspace account to continue.</p>
+          <p id="auth-message" class="auth-message">Free scans work without an account. Sign up to save history.</p>
         </section>
       </section>
     </div>
@@ -308,7 +308,7 @@
           </label>
           <div class="account-quota-card" id="account-quota-card" aria-live="polite">
             <span>Quota left</span>
-            <strong>Sign in to view</strong>
+            <strong>Free scan ready</strong>
           </div>
           <button type="button" id="logout-button">Logout</button>
         </section>
@@ -520,6 +520,6 @@
     </div>
 
     <script src="https://accounts.google.com/gsi/client?hl=en" async defer></script>
-    <script src="/static/app.js?v=spotify-ui-14"></script>
+    <script src="/static/app.js?v=white-easy-scan-1"></script>
   </body>
 </html>

@@ -55,6 +55,7 @@ LOG_STATIC_VISITS = os.getenv("AEGIS_LOG_STATIC_VISITS", "").strip().lower() in 
 MAX_LOG_VALUE_LENGTH = int(os.getenv("AEGIS_MAX_LOG_VALUE_LENGTH", "2000"))
 DB_DUMP_DEFAULT_ROW_LIMIT = int(os.getenv("AEGIS_DB_DUMP_DEFAULT_ROW_LIMIT", "0"))
 DB_DUMP_HARD_ROW_LIMIT = int(os.getenv("AEGIS_DB_DUMP_HARD_ROW_LIMIT", "0"))
+GUEST_SHEEPSTEALER_DAILY_LIMIT = int(os.getenv("AEGIS_GUEST_SHEEPSTEALER_DAILY_LIMIT", "1"))
 SESSION_TTL_DAYS = int(os.getenv("AEGIS_SESSION_TTL_DAYS", "30"))
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 ADMIN_USERNAME = os.getenv("AEGIS_ADMIN_USERNAME", "caraxes88").strip()
@@ -90,15 +91,16 @@ LLM_BASE_PROMPT = (
 )
 DB_LOCK = threading.Lock()
 CANCELLED_RUNS: set[str] = set()
-DEFAULT_PLAN = "sheepstealer_daily"
+DEFAULT_PLAN = "free"
+GUEST_PLAN_ID = "guest_free"
 PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
     "free": {
         "label": "Free",
         "price": "$0",
-        "description": "Free workspace access. Aelyx is reserved for paid launch plans.",
+        "description": "Free account access with saved history and a fresh daily scan quota.",
         "limits": {
             "aegis": {"limit": 0, "period": "day"},
-            "sheepstealer": {"limit": 0, "period": "day"},
+            "sheepstealer": {"limit": 2, "period": "day"},
         },
     },
     "sheepstealer_daily": {
@@ -349,7 +351,7 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS analysis_runs (
                 id TEXT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
+                user_id BIGINT,
                 username TEXT NOT NULL,
                 user_plan TEXT NOT NULL,
                 ip_address TEXT NOT NULL,
@@ -467,6 +469,7 @@ def init_db() -> None:
         ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "analysis_runs", "report_json", "JSONB NOT NULL DEFAULT '{}'::jsonb")
+        connection.execute("ALTER TABLE analysis_runs ALTER COLUMN user_id DROP NOT NULL")
         for column, definition in {
             "session_id": "TEXT NOT NULL DEFAULT ''",
             "country": "TEXT NOT NULL DEFAULT ''",
@@ -1148,10 +1151,28 @@ def period_key(period: str) -> str:
     return now.strftime("%Y-%m-%d")
 
 
+def usage_ip_subject(ip_address: str) -> str:
+    digest = hashlib.sha256(str(ip_address or "unknown").encode("utf-8")).hexdigest()
+    return f"guest-ip:{digest[:32]}"
+
+
 def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> dict[str, Any]:
     if not user:
-        return {"allowed": False, "message": "Sign in required before running an analysis."}
-    if user.get("is_admin"):
+        if engine != "sheepstealer":
+            return {
+                "allowed": False,
+                "engine": engine,
+                "plan": GUEST_PLAN_ID,
+                "limit": 0,
+                "remaining": 0,
+                "message": "Create a free account to unlock this engine.",
+            }
+        plan_id = GUEST_PLAN_ID
+        plan_label = "Guest"
+        limit = max(0, GUEST_SHEEPSTEALER_DAILY_LIMIT)
+        period = "day"
+        subjects = [usage_ip_subject(ip_address)]
+    elif user.get("is_admin"):
         return {
             "allowed": True,
             "engine": engine,
@@ -1160,11 +1181,17 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
             "remaining": None,
             "message": "Admin quota bypass active.",
         }
+    else:
+        plan_id = normalize_plan(user["plan"]["id"])
+        plan_label = PLAN_DEFINITIONS[plan_id]["label"]
+        limit_config = PLAN_DEFINITIONS[plan_id]["limits"].get(
+            engine,
+            {"limit": 0, "period": "day"},
+        )
+        limit = int(limit_config.get("limit") or 0)
+        period = str(limit_config.get("period") or "day")
+        subjects = [f"user:{user['id']}"]
 
-    plan_id = normalize_plan(user["plan"]["id"])
-    limit_config = PLAN_DEFINITIONS[plan_id]["limits"].get(engine, {"limit": 0, "period": "day"})
-    limit = int(limit_config.get("limit") or 0)
-    period = str(limit_config.get("period") or "day")
     if limit <= 0:
         return {
             "allowed": False,
@@ -1172,13 +1199,10 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
             "plan": plan_id,
             "limit": 0,
             "remaining": 0,
-            "message": f"Your {PLAN_DEFINITIONS[plan_id]['label']} plan does not include {engine} runs.",
+            "message": f"{plan_label} access does not include {engine} runs.",
         }
 
     key = period_key(period)
-    subjects = [f"user:{user['id']}"]
-    if plan_id == "free":
-        subjects.append(f"ip:{ip_address}")
 
     with DB_LOCK, db_connect() as connection:
         counts = []
@@ -1200,7 +1224,10 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
                 "limit": limit,
                 "remaining": 0,
                 "period": period,
-                "message": f"{PLAN_DEFINITIONS[plan_id]['label']} quota reached for {engine}.",
+                "message": (
+                    f"{plan_label} quota reached for {engine}. "
+                    "Create an account for a fresh quota."
+                ),
             }
         now = utc_now()
         for subject in subjects:
@@ -1254,8 +1281,6 @@ def usage_snapshot(user: dict[str, Any], ip_address: str = "") -> dict[str, Any]
             numeric_limit = int(limit or 0)
             key = period_key(period)
             subjects = [f"user:{user['id']}"]
-            if plan_id == "free" and ip_address:
-                subjects.append(f"ip:{ip_address}")
             counts = []
             for subject in subjects:
                 row = connection.execute(
@@ -1274,6 +1299,33 @@ def usage_snapshot(user: dict[str, Any], ip_address: str = "") -> dict[str, Any]
                 "used": used,
             }
     return {"plan": plan_id, "quotas": quotas}
+
+
+def guest_usage_snapshot(ip_address: str) -> dict[str, Any]:
+    limit = max(0, GUEST_SHEEPSTEALER_DAILY_LIMIT)
+    key = period_key("day")
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT count FROM usage_counters
+            WHERE subject = %s AND engine = 'sheepstealer' AND period_key = %s
+            """,
+            (usage_ip_subject(ip_address), key),
+        ).fetchone()
+    used = int(row["count"]) if row else 0
+    return {
+        "plan": GUEST_PLAN_ID,
+        "guest": True,
+        "quotas": {
+            "aegis": {"limit": 0, "remaining": 0, "period": "day", "used": 0},
+            "sheepstealer": {
+                "limit": limit,
+                "remaining": max(0, limit - used),
+                "period": "day",
+                "used": used,
+            },
+        },
+    }
 
 
 def has_aegis_plan_access(user: dict[str, Any]) -> bool:
@@ -1296,7 +1348,7 @@ def update_user_plan(user_id: int, plan: str) -> dict[str, Any]:
 
 
 def create_analysis_run(
-    user: dict[str, Any],
+    user: dict[str, Any] | None,
     ip_address: str,
     target: str,
     engine: str,
@@ -1306,6 +1358,9 @@ def create_analysis_run(
 ) -> str:
     run_id = sanitize_run_id(requested_run_id) or uuid.uuid4().hex
     now = utc_now()
+    user_id = int(user["id"]) if user else None
+    username = str(user["username"]) if user else "Guest"
+    user_plan = str(user["plan"]["id"]) if user else GUEST_PLAN_ID
     with DB_LOCK, db_connect() as connection:
         for _ in range(2):
             cursor = connection.execute(
@@ -1320,9 +1375,9 @@ def create_analysis_run(
                 """,
                 (
                     run_id,
-                    int(user["id"]),
-                    str(user["username"]),
-                    str(user["plan"]["id"]),
+                    user_id,
+                    username,
+                    user_plan,
                     ip_address,
                     target,
                     engine,
@@ -1363,6 +1418,8 @@ def cancel_analysis_run(run_id: str, user: dict[str, Any]) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Run not found.")
+        if row["user_id"] is None and not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Run access denied.")
         if not user.get("is_admin") and int(row["user_id"]) != int(user["id"]):
             raise HTTPException(status_code=403, detail="Run access denied.")
         if row["status"] in {"completed", "failed", "blocked", "cancelled"}:
@@ -1965,7 +2022,9 @@ def api_update_plan(request: Request, payload: PlanRequest) -> dict[str, Any]:
 
 @app.get("/api/account/quota")
 def api_account_quota(request: Request) -> dict[str, Any]:
-    user = require_user(request)
+    user = authenticate_request(request)
+    if not user:
+        return guest_usage_snapshot(client_ip(request))
     return usage_snapshot(user, client_ip(request))
 
 
@@ -2111,10 +2170,6 @@ async def run_analysis(
         return step
 
     try:
-        if not auth_context:
-            yield event("error", {"message": "Sign in or create an account before running Aelyx."})
-            return
-
         if not payload.authorized:
             yield event(
                 "error",
@@ -2137,7 +2192,27 @@ async def run_analysis(
         target_url = await asyncio.to_thread(normalize_target, payload.target)
         selected_engine = normalize_analysis_engine(payload.engine)
         validation_mode = normalize_validation_mode(payload.validation_mode)
-        if selected_engine == "aegis" and not has_aegis_plan_access(auth_context):
+        actor_id = int(auth_context["id"]) if auth_context else None
+        if not auth_context and selected_engine != "sheepstealer":
+            yield event(
+                "error",
+                {
+                    "message": (
+                        "Guest scans use the free sheepstealer engine. "
+                        "Create an account to unlock Aelyx."
+                    )
+                },
+            )
+            return
+        if not auth_context and validation_mode != "safe":
+            yield event(
+                "error",
+                {"message": "Guest scans use safe analysis. Create an account for validation modes."},
+            )
+            return
+        if selected_engine == "aegis" and (
+            not auth_context or not has_aegis_plan_access(auth_context)
+        ):
             yield event(
                 "error",
                 {
@@ -2149,7 +2224,7 @@ async def run_analysis(
             )
             return
         if validation_mode == "proof" and not (
-            PROOF_MODE_LAUNCHED and has_aegis_plan_access(auth_context)
+            auth_context and PROOF_MODE_LAUNCHED and has_aegis_plan_access(auth_context)
         ):
             yield event(
                 "error",
@@ -2179,7 +2254,7 @@ async def run_analysis(
         log_activity(
             "analysis",
             "created",
-            int(auth_context["id"]),
+            actor_id,
             request,
             {
                 "run_id": run_id,
@@ -2196,7 +2271,7 @@ async def run_analysis(
             log_activity(
                 "analysis",
                 "quota_blocked",
-                int(auth_context["id"]),
+                actor_id,
                 request,
                 {"run_id": run_id, "engine": selected_engine, "quota": quota},
             )
@@ -2339,7 +2414,7 @@ async def run_analysis(
             log_activity(
                 "analysis",
                 "completed",
-                int(auth_context["id"]),
+                actor_id,
                 request,
                 {
                     "run_id": run_id,
@@ -2543,7 +2618,7 @@ async def run_analysis(
         log_activity(
             "analysis",
             "completed",
-            int(auth_context["id"]),
+            actor_id,
             request,
             {
                 "run_id": run_id,
