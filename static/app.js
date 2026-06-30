@@ -39,6 +39,7 @@ const downloadDbDumpButton = document.querySelector("#download-db-dump");
 const adminSummary = document.querySelector("#admin-summary");
 const adminLiveRuns = document.querySelector("#admin-live-runs");
 const adminLiveHumans = document.querySelector("#admin-live-humans");
+const adminUsers = document.querySelector("#admin-users");
 const adminPreorders = document.querySelector("#admin-preorders");
 const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
@@ -77,6 +78,7 @@ const hostingList = document.querySelector("#hosting-list");
 const impactPanel = document.querySelector("#impact-panel");
 const reportModal = document.querySelector("#report-modal");
 const openReportButton = document.querySelector("#open-report");
+const openAdminDashboardButton = document.querySelector("#open-admin-dashboard");
 const navActions = document.querySelectorAll("[data-nav-target]");
 const closeReportTriggers = document.querySelectorAll("[data-close-report]");
 const closeAuthTriggers = document.querySelectorAll("[data-close-auth]");
@@ -162,7 +164,9 @@ menuToggle?.addEventListener("click", () => {
 validationModeInput?.addEventListener("change", updateProofConsentVisibility);
 
 sessionButton?.addEventListener("click", () => {
-  if (currentUser) {
+  if (currentUser?.is_admin) {
+    openAdminDashboardPage();
+  } else if (currentUser) {
     openAccountModal();
   } else {
     openAuthModal("login");
@@ -170,7 +174,9 @@ sessionButton?.addEventListener("click", () => {
 });
 
 profileCard?.addEventListener("click", () => {
-  if (currentUser) {
+  if (currentUser?.is_admin) {
+    openAdminDashboardPage();
+  } else if (currentUser) {
     openAccountModal();
   } else {
     openAuthModal("login");
@@ -294,6 +300,10 @@ openReportButton?.addEventListener("click", () => {
   }
   renderEmptyReport();
   openReportModal();
+});
+
+openAdminDashboardButton?.addEventListener("click", () => {
+  openAdminDashboardPage();
 });
 
 navActions.forEach((action) => {
@@ -658,12 +668,16 @@ function renderSession() {
       : "Account";
     sessionButton.classList.toggle("is-authenticated", signedIn);
   }
+  if (openAdminDashboardButton) {
+    openAdminDashboardButton.hidden = !currentUser?.is_admin;
+  }
   renderProfileCard();
   renderAelyxPreorderState();
   enforceLockedSelections();
   if (!signedIn) {
     closeAccountModal();
     if (adminDashboard) adminDashboard.hidden = true;
+    accountModal?.classList.remove("is-admin-page");
     stopAdminDashboardRefresh();
     showAuthMessage("Free scan works without sign-in.", false);
     loadAccountQuota();
@@ -677,7 +691,7 @@ function renderSession() {
     accountPlanInput.value = plan.id === "admin" ? "pro_3" : plan.id;
     accountPlanInput.disabled = Boolean(currentUser.is_admin);
   }
-  if (adminDashboard) adminDashboard.hidden = !currentUser.is_admin;
+  if (adminDashboard) adminDashboard.hidden = true;
   loadAccountQuota();
   loadWorkspaceHistory();
   if (currentUser.is_admin) loadAdminDashboard();
@@ -892,7 +906,9 @@ function closeAuthModal() {
 function openAccountModal() {
   closeAuthModal();
   if (!accountModal) return;
+  accountModal.classList.remove("is-admin-page");
   accountModal.hidden = false;
+  if (adminDashboard) adminDashboard.hidden = true;
   document.body.classList.add("modal-open");
   resetModalScroll(accountModal);
   accountPlanInput?.focus();
@@ -902,9 +918,28 @@ function openAccountModal() {
   }
 }
 
+function openAdminDashboardPage() {
+  if (!currentUser?.is_admin || !accountModal || !adminDashboard) {
+    if (!currentUser) openAuthModal("login");
+    return;
+  }
+  closeAuthModal();
+  closeReportModal();
+  closePreorderModal();
+  accountModal.classList.add("is-admin-page");
+  accountModal.hidden = false;
+  adminDashboard.hidden = false;
+  document.body.classList.add("modal-open");
+  resetModalScroll(accountModal);
+  loadAdminDashboard();
+  startAdminDashboardRefresh();
+  refreshAdminDashboardButton?.focus();
+}
+
 function closeAccountModal() {
   if (!accountModal) return;
   accountModal.hidden = true;
+  accountModal.classList.remove("is-admin-page");
   stopAdminDashboardRefresh();
   if (reportModal?.hidden !== false && authModal?.hidden !== false) {
     document.body.classList.remove("modal-open");
@@ -969,6 +1004,7 @@ function setAdminLoading() {
   if (adminSummary) adminSummary.innerHTML = '<p class="admin-empty">Loading dashboard...</p>';
   if (adminLiveRuns) adminLiveRuns.innerHTML = "";
   if (adminLiveHumans) adminLiveHumans.innerHTML = "";
+  if (adminUsers) adminUsers.innerHTML = "";
   if (adminPreorders) adminPreorders.innerHTML = "";
   if (adminRuns) adminRuns.innerHTML = "";
   if (adminVisitors) adminVisitors.innerHTML = "";
@@ -994,6 +1030,7 @@ function renderAdminDashboard(data) {
       ["Users", summary.user_accounts || 0],
       ["Pre", summary.preorders || 0],
       ["Humans", sessionStats.session_visitors || summary.unique_visitors || 0],
+      ["Signups", sessionStats.signed_up_visitors || 0],
       ["Visits", sessionStats.sessions || summary.visitor_sessions || 0],
       ["Guests", sessionStats.external_visitors || 0],
       ["Time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
@@ -1025,6 +1062,7 @@ function renderAdminDashboard(data) {
     "No live runs.",
   );
   renderAdminHumanBoard(adminLiveHumans, visitors, insights.sessions || []);
+  renderAdminUsers(adminUsers, dashboard.users || []);
   renderAdminTable(
     adminPreorders,
     dashboard.preorders || [],
@@ -1058,7 +1096,7 @@ function renderAdminDashboard(data) {
   renderAdminTable(
     adminCampaigns,
     insights.campaigns || [],
-    ["Source", "Medium", "Campaign", "Sessions", "Visitors", "Pages", "Avg time", "Conv."],
+    ["Source", "Medium", "Campaign", "Sessions", "Visitors", "Pages", "Avg time", "Signups", "Conv.", "Targets"],
     (campaign) => [
       campaign.source || "direct",
       campaign.medium || "none",
@@ -1067,7 +1105,9 @@ function renderAdminDashboard(data) {
       campaign.visitors || 0,
       campaign.page_views || 0,
       formatDuration((campaign.avg_duration_seconds || 0) * 1000),
+      campaign.signups || 0,
       campaign.conversions || 0,
+      campaign.targets || 0,
     ],
     "No campaign data in this period.",
   );
@@ -1129,6 +1169,50 @@ function renderAdminHumanBoard(container, visitors, sessions) {
   `;
 }
 
+function renderAdminUsers(container, users) {
+  if (!container) return;
+  users = Array.isArray(users) ? users : [];
+  if (!users.length) {
+    container.innerHTML = '<p class="admin-empty">No users yet.</p>';
+    return;
+  }
+  container.innerHTML = users
+    .slice(0, 60)
+    .map((user) => {
+      const targets = normalizeList(user.targets).slice(0, 3);
+      return `
+        <article class="admin-user-card">
+          <div class="admin-user-top">
+            <span class="admin-user-avatar" aria-hidden="true">${escapeHtml(userInitials(user))}</span>
+            <div>
+              <strong>${escapeHtml(user.username || "user")}</strong>
+              <span>${escapeHtml(user.email || user.provider || "local")}</span>
+            </div>
+            <i>${escapeHtml(user.is_admin ? "admin" : user.plan || "free")}</i>
+          </div>
+          <div class="admin-human-meta">
+            <span>${escapeHtml(user.run_count || 0)} scans</span>
+            <span>${escapeHtml(user.linked_human_visitors || 0)} humans</span>
+            <span>${escapeHtml(user.aegis_waitlist_at ? "pre-reg" : "no pre-reg")}</span>
+          </div>
+          <dl class="admin-human-details">
+            <div><dt>Signup</dt><dd>${escapeHtml(relativeTime(user.created_at))}</dd></div>
+            <div><dt>Seen</dt><dd>${escapeHtml(relativeTime(user.visit_last_seen_at || user.auth_last_seen_at))}</dd></div>
+            <div><dt>Last target</dt><dd>${escapeHtml(compactUrl(user.last_target || "none"))}</dd></div>
+          </dl>
+          <ol class="admin-human-history">
+            ${
+              targets.length
+                ? targets.map((target) => `<li><strong>${escapeHtml(compactUrl(target))}</strong><span>target tried</span></li>`).join("")
+                : '<li><strong>No target yet</strong><span>no scan linked</span></li>'
+            }
+          </ol>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function renderAdminVisitorCards(container, visitors, sessions) {
   if (!container) return;
   visitors = Array.isArray(visitors) ? visitors : [];
@@ -1160,12 +1244,16 @@ function renderAdminHumanCard(visitor, sessions, compact = false) {
         <span>${escapeHtml(visitor.sessions || 0)} sessions</span>
         <span>${escapeHtml(visitor.page_views || 0)} pages</span>
         <span>${escapeHtml(formatDuration((visitor.max_duration_seconds || visitor.avg_duration_seconds || 0) * 1000))}</span>
+        <span>${escapeHtml(Number(visitor.signed_up || 0) ? "signed up" : "no signup")}</span>
+        <span>${escapeHtml(visitor.target_attempt_count || 0)} targets</span>
       </div>
       <dl class="admin-human-details">
+        <div><dt>Signup</dt><dd>${escapeHtml(visitorSignupLabel(visitor))}</dd></div>
         <div><dt>Where</dt><dd>${escapeHtml(visitorRegion(visitor))}</dd></div>
         <div><dt>Device</dt><dd>${escapeHtml(visitorDevice(visitor))}</dd></div>
         <div><dt>Source</dt><dd>${escapeHtml(visitorSource(visitor))}</dd></div>
       </dl>
+      ${renderTargetAttempts(visitor)}
       <ol class="admin-human-history">
         ${history.map((item) => `
           <li>
@@ -1175,6 +1263,16 @@ function renderAdminHumanCard(visitor, sessions, compact = false) {
         `).join("")}
       </ol>
     </article>
+  `;
+}
+
+function renderTargetAttempts(visitor) {
+  const targets = normalizeList(visitor?.target_attempts).slice(0, 4);
+  if (!targets.length) return "";
+  return `
+    <ol class="admin-target-list" aria-label="Targets tried">
+      ${targets.map((target) => `<li>${escapeHtml(compactUrl(target))}</li>`).join("")}
+    </ol>
   `;
 }
 
@@ -1194,6 +1292,27 @@ function visitorAvatarLabel(visitor) {
 function visitorEntryLabel(visitor) {
   if (!visitor?.first_seen_at) return "new";
   return `joined ${relativeTime(visitor.first_seen_at)}`;
+}
+
+function visitorSignupLabel(visitor) {
+  if (!Number(visitor?.signed_up || 0)) return "No";
+  const identity = visitor?.username || visitor?.email || visitor?.provider || "Yes";
+  return identity;
+}
+
+function userInitials(user) {
+  const source = String(user?.username || user?.email || "U").trim();
+  const parts = source.split(/[\s._@-]+/).filter(Boolean);
+  return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : source.slice(0, 2)).toUpperCase();
+}
+
+function normalizeList(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (!value) return [];
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function visitorHistoryItems(visitor, sessions, limit) {

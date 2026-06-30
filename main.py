@@ -1853,6 +1853,7 @@ def admin_funnel_insights(connection: psycopg.Connection) -> dict[str, Any]:
 def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
     insights: dict[str, Any] = {}
     for window_id, session_clause in ADMIN_SESSION_WINDOWS.items():
+        funnel_time_clause = session_clause.replace("last_seen_at", "created_at")
         session_stats = connection.execute(
             f"""
             SELECT
@@ -1861,6 +1862,14 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COUNT(DISTINCT visitor_id)::int AS session_visitors,
                 COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NULL)::int AS external_visitors,
                 COUNT(DISTINCT visitor_id) FILTER (WHERE user_id IS NOT NULL)::int AS signed_in_visitors,
+                COUNT(DISTINCT visitor_id) FILTER (
+                    WHERE user_id IS NOT NULL
+                    OR visitor_id IN (
+                        SELECT visitor_id
+                        FROM funnel_events
+                        WHERE event_name = 'signup_completed'
+                    )
+                )::int AS signed_up_visitors,
                 COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
                 COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
                 COALESCE(ROUND(AVG(page_views))::int, 0) AS avg_page_views,
@@ -1875,8 +1884,58 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
         visitors = connection.execute(
             f"""
             SELECT
-                visitor_id,
-                MAX(user_id) AS user_id,
+                visitor_sessions.visitor_id,
+                MAX(visitor_sessions.user_id) AS user_id,
+                COALESCE(
+                    MAX(users.username),
+                    (
+                        SELECT MAX(funnel_users.username)
+                        FROM funnel_events
+                        JOIN users AS funnel_users ON funnel_users.id = funnel_events.user_id
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                    ),
+                    ''
+                ) AS username,
+                COALESCE(
+                    MAX(users.email),
+                    (
+                        SELECT MAX(funnel_users.email)
+                        FROM funnel_events
+                        JOIN users AS funnel_users ON funnel_users.id = funnel_events.user_id
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                    ),
+                    ''
+                ) AS email,
+                COALESCE(
+                    MAX(users.provider),
+                    (
+                        SELECT MAX(funnel_users.provider)
+                        FROM funnel_events
+                        JOIN users AS funnel_users ON funnel_users.id = funnel_events.user_id
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                    ),
+                    ''
+                ) AS provider,
+                COALESCE(
+                    MAX(users.plan),
+                    (
+                        SELECT MAX(funnel_users.plan)
+                        FROM funnel_events
+                        JOIN users AS funnel_users ON funnel_users.id = funnel_events.user_id
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                    ),
+                    ''
+                ) AS plan,
+                CASE
+                    WHEN MAX(visitor_sessions.user_id) IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM funnel_events
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                          AND funnel_events.event_name = 'signup_completed'
+                    )
+                    THEN 1 ELSE 0
+                END AS signed_up,
                 COUNT(*)::int AS sessions,
                 COALESCE(SUM(page_views), 0)::int AS page_views,
                 COALESCE(MAX(duration_seconds), 0)::int AS max_duration_seconds,
@@ -1884,6 +1943,24 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 MAX(converted_preorder)::int AS converted_preorder,
                 MIN(started_at) AS first_seen_at,
                 MAX(last_seen_at) AS last_seen_at,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT NULLIF(target, ''))::int
+                        FROM funnel_events
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                          AND NULLIF(target, '') IS NOT NULL
+                    ),
+                    0
+                ) AS target_attempt_count,
+                COALESCE(
+                    (
+                        SELECT ARRAY_AGG(DISTINCT target)
+                        FROM funnel_events
+                        WHERE funnel_events.visitor_id = visitor_sessions.visitor_id
+                          AND NULLIF(target, '') IS NOT NULL
+                    ),
+                    ARRAY[]::text[]
+                ) AS target_attempts,
                 (ARRAY_AGG(country ORDER BY last_seen_at DESC))[1] AS country,
                 (ARRAY_AGG(region ORDER BY last_seen_at DESC))[1] AS region,
                 (ARRAY_AGG(city ORDER BY last_seen_at DESC))[1] AS city,
@@ -1898,8 +1975,9 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS landing_path,
                 (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path
             FROM visitor_sessions
+            LEFT JOIN users ON users.id = visitor_sessions.user_id
             WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
-            GROUP BY visitor_id
+            GROUP BY visitor_sessions.visitor_id
             ORDER BY last_seen_at DESC
             LIMIT 100
             """
@@ -1927,7 +2005,27 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COUNT(DISTINCT visitor_id)::int AS visitors,
                 COALESCE(SUM(page_views), 0)::int AS page_views,
                 COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
-                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
+                COUNT(DISTINCT visitor_id) FILTER (
+                    WHERE user_id IS NOT NULL
+                    OR visitor_id IN (
+                        SELECT visitor_id
+                        FROM funnel_events
+                        WHERE event_name = 'signup_completed'
+                    )
+                )::int AS signups,
+                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT NULLIF(target, ''))::int
+                        FROM funnel_events
+                        WHERE ({funnel_time_clause}) AND {ADMIN_HUMAN_FUNNEL_FILTER}
+                          AND COALESCE(NULLIF(funnel_events.utm_source, ''), 'direct') = COALESCE(NULLIF(visitor_sessions.utm_source, ''), 'direct')
+                          AND COALESCE(NULLIF(funnel_events.utm_medium, ''), 'none') = COALESCE(NULLIF(visitor_sessions.utm_medium, ''), 'none')
+                          AND COALESCE(NULLIF(funnel_events.utm_campaign, ''), 'none') = COALESCE(NULLIF(visitor_sessions.utm_campaign, ''), 'none')
+                          AND NULLIF(target, '') IS NOT NULL
+                    ),
+                    0
+                ) AS targets
             FROM visitor_sessions
             WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
             GROUP BY 1, 2, 3
@@ -1974,6 +2072,81 @@ def admin_dashboard_payload() -> dict[str, Any]:
             LIMIT 50
             """
         ).fetchall()
+        user_rows = connection.execute(
+            f"""
+            SELECT
+                users.id,
+                users.username,
+                users.email,
+                users.provider,
+                users.plan,
+                users.is_admin,
+                users.aegis_waitlist_at,
+                users.created_at,
+                users.updated_at,
+                (SELECT MAX(last_seen_at) FROM sessions WHERE sessions.user_id = users.id) AS auth_last_seen_at,
+                (SELECT COUNT(*)::int FROM sessions WHERE sessions.user_id = users.id) AS auth_sessions,
+                (
+                    SELECT MAX(last_seen_at)
+                    FROM visitor_sessions
+                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                ) AS visit_last_seen_at,
+                (
+                    SELECT COUNT(DISTINCT visitor_id)::int
+                    FROM visitor_sessions
+                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                ) AS linked_human_visitors,
+                (
+                    SELECT COALESCE(SUM(page_views), 0)::int
+                    FROM visitor_sessions
+                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                ) AS page_views,
+                (
+                    SELECT COUNT(*)::int
+                    FROM analysis_runs
+                    WHERE analysis_runs.user_id = users.id
+                ) AS run_count,
+                (
+                    SELECT MAX(started_at)
+                    FROM analysis_runs
+                    WHERE analysis_runs.user_id = users.id
+                ) AS last_run_at,
+                (
+                    SELECT target
+                    FROM (
+                        SELECT target, started_at AS seen_at
+                        FROM analysis_runs
+                        WHERE analysis_runs.user_id = users.id
+                        UNION ALL
+                        SELECT target, created_at AS seen_at
+                        FROM funnel_events
+                        WHERE funnel_events.user_id = users.id
+                    ) AS user_targets
+                    WHERE NULLIF(target, '') IS NOT NULL
+                    ORDER BY seen_at DESC
+                    LIMIT 1
+                ) AS last_target,
+                COALESCE(
+                    (
+                        SELECT ARRAY_AGG(DISTINCT target)
+                        FROM (
+                            SELECT target
+                            FROM analysis_runs
+                            WHERE analysis_runs.user_id = users.id
+                            UNION ALL
+                            SELECT target
+                            FROM funnel_events
+                            WHERE funnel_events.user_id = users.id
+                        ) AS user_targets
+                        WHERE NULLIF(target, '') IS NOT NULL
+                    ),
+                    ARRAY[]::text[]
+                ) AS targets
+            FROM users
+            ORDER BY users.created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
         summary = connection.execute(
             f"""
             SELECT
@@ -1992,6 +2165,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
 
     return {
         "summary": row_to_dict(summary),
+        "users": [row_to_dict(row) for row in user_rows],
         "preorders": [row_to_dict(row) for row in preorder_rows],
         "live_runs": [row_to_dict(row) for row in live_rows],
         "recent_runs": [row_to_dict(row) for row in run_rows],
