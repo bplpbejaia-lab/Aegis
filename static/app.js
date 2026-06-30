@@ -43,6 +43,8 @@ const adminRuns = document.querySelector("#admin-runs");
 const adminVisitors = document.querySelector("#admin-visitors");
 const adminCampaigns = document.querySelector("#admin-campaigns");
 const adminSessions = document.querySelector("#admin-sessions");
+const adminFunnel = document.querySelector("#admin-funnel");
+const adminFunnelCampaigns = document.querySelector("#admin-funnel-campaigns");
 const adminPeriodTabs = document.querySelectorAll("[data-admin-period]");
 const adminPeriodNote = document.querySelector("#admin-period-note");
 const authMessage = document.querySelector("#auth-message");
@@ -116,6 +118,8 @@ let adminDashboardData = null;
 let adminSelectedPeriod = "day";
 let visitorStartedAt = Date.now();
 let visitorHeartbeatTimer = null;
+let ctaViewedLogged = false;
+let signupOpenedLogged = false;
 
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", initializeApp);
@@ -133,6 +137,7 @@ async function initializeApp() {
   await restoreSession();
   initializeGoogleSignIn();
   startVisitorHeartbeat();
+  trackCtaViewed();
   installLocalPreviewHook();
 }
 
@@ -170,10 +175,12 @@ profileCard?.addEventListener("click", () => {
 });
 
 aegisPreorderCard?.addEventListener("click", () => {
+  trackFunnelEvent("preorder_clicked", { source: "preorder_card" });
   openPreorderModal();
 });
 
 confirmAelyxPreorderButton?.addEventListener("click", () => {
+  trackFunnelEvent("preorder_clicked", { source: "preorder_confirm" });
   preorderAelyxAccess();
 });
 
@@ -437,8 +444,41 @@ function sendVisitorHeartbeat({ visible = true, keepalive = false } = {}) {
   }).catch(() => {});
 }
 
+function trackCtaViewed() {
+  if (ctaViewedLogged) return;
+  ctaViewedLogged = true;
+  trackFunnelEvent("cta_viewed", { source: "target_console" });
+}
+
+function trackSignupOpened(source = "auth_modal") {
+  if (signupOpenedLogged) return;
+  signupOpenedLogged = true;
+  trackFunnelEvent("signup_opened", { source });
+}
+
+function trackFunnelEvent(eventName, metadata = {}, { keepalive = false } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  const token = window.localStorage.getItem(SESSION_KEY);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const payload = {
+    event_name: eventName,
+    path: `${window.location.pathname}${window.location.search}`,
+    target: targetInput?.value?.trim() || "",
+    engine: analysisEngineInput?.value || "",
+    validation_mode: validationModeInput?.value || "",
+    metadata,
+  };
+  return fetch("/api/funnel", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    keepalive,
+  }).catch(() => {});
+}
+
 function switchAuthTab(tabName) {
   const isSignup = tabName === "signup";
+  if (isSignup) trackSignupOpened("auth_tab");
   authTabs.forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.authTab === tabName);
   });
@@ -911,12 +951,15 @@ function setAdminLoading() {
   if (adminVisitors) adminVisitors.innerHTML = "";
   if (adminCampaigns) adminCampaigns.innerHTML = "";
   if (adminSessions) adminSessions.innerHTML = "";
+  if (adminFunnel) adminFunnel.innerHTML = "";
+  if (adminFunnelCampaigns) adminFunnelCampaigns.innerHTML = "";
 }
 
 function renderAdminDashboard(data) {
   adminDashboardData = data || adminDashboardData || {};
   const dashboard = adminDashboardData || {};
   const insights = selectedAdminInsights(dashboard);
+  const funnel = selectedAdminFunnel(dashboard);
   const sessionStats = insights.session_stats || {};
   const summary = dashboard.summary || {};
   const visitors = insights.visitors || [];
@@ -925,13 +968,15 @@ function renderAdminDashboard(data) {
     adminSummary.innerHTML = [
       ["Runs", summary.runs || 0],
       ["Live runs", summary.live_runs || 0],
+      ["Accounts", summary.user_accounts || 0],
       ["Pre-regs", summary.preorders || 0],
-      ["Distinct visitors", sessionStats.session_visitors || summary.unique_visitors || 0],
-      ["External visitors", sessionStats.external_visitors || 0],
-      ["Sessions", sessionStats.sessions || summary.visitor_sessions || 0],
+      ["Human visitors", sessionStats.session_visitors || summary.unique_visitors || 0],
+      ["Human sessions", sessionStats.sessions || summary.visitor_sessions || 0],
+      ["Guest visitors", sessionStats.external_visitors || 0],
       ["Avg time", formatDuration((sessionStats.avg_duration_seconds || 0) * 1000)],
       ["Engaged", sessionStats.engaged_sessions || 0],
       ["Conversions", sessionStats.preorder_conversions || 0],
+      ["Noise filtered", summary.filtered_noise_sessions || 0],
     ]
       .map(
         ([label, value]) => `
@@ -1021,6 +1066,31 @@ function renderAdminDashboard(data) {
     "No campaign data in this period.",
   );
   renderAdminTable(
+    adminFunnel,
+    funnel.events || [],
+    ["Event", "Events", "Visitors"],
+    (item) => [
+      formatFunnelEvent(item.event_name),
+      item.events || 0,
+      item.visitors || 0,
+    ],
+    "No funnel events in this period.",
+  );
+  renderAdminTable(
+    adminFunnelCampaigns,
+    funnel.campaigns || [],
+    ["Source", "Medium", "Campaign", "Event", "Events", "Visitors"],
+    (item) => [
+      item.source || "direct",
+      item.medium || "none",
+      item.campaign || "none",
+      formatFunnelEvent(item.event_name),
+      item.events || 0,
+      item.visitors || 0,
+    ],
+    "No funnel campaign data in this period.",
+  );
+  renderAdminTable(
     adminSessions,
     insights.sessions || [],
     ["Seen", "Visitor", "Landing", "Last page", "Pages", "Time", "Source", "Pre-reg"],
@@ -1073,6 +1143,14 @@ function selectedAdminInsights(data) {
   };
 }
 
+function selectedAdminFunnel(data) {
+  const insights = data?.funnel_insights || {};
+  return insights[adminSelectedPeriod] || insights.day || {
+    events: [],
+    campaigns: [],
+  };
+}
+
 function renderAdminPeriodTabs() {
   adminPeriodTabs.forEach((tab) => {
     const isActive = tab.dataset.adminPeriod === adminSelectedPeriod;
@@ -1082,6 +1160,12 @@ function renderAdminPeriodTabs() {
   if (adminPeriodNote) {
     adminPeriodNote.textContent = ADMIN_PERIOD_LABELS[adminSelectedPeriod] || "Filtered";
   }
+}
+
+function formatFunnelEvent(value) {
+  return String(value || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function shortVisitorId(value) {
@@ -1214,6 +1298,12 @@ async function runAnalysis() {
   let validationMode = validationModeInput?.value || "proof";
   if (!["active", "proof"].includes(validationMode)) validationMode = "proof";
   let proofAuthorized = Boolean(proofAuthorizedInput?.checked);
+  trackFunnelEvent("cta_clicked", {
+    source: "target_console",
+    engine: selectedEngine,
+    validation_mode: validationMode,
+    proof_authorized: proofAuthorized,
+  });
   if (selectedEngine === "aegis" && isAelyxEngineLocked()) {
     showError("Aelyx unlocks after account setup. Start with the free scan here.");
     if (currentUser) {
@@ -1296,7 +1386,7 @@ async function runAnalysis() {
     runButton.classList.remove("is-running");
     if (stopButton) stopButton.hidden = true;
     currentRunController = null;
-    runLabel.textContent = "Scan free";
+    runLabel.textContent = "Scan my website";
     window.clearInterval(timer);
     updateElapsed();
   }
@@ -2382,7 +2472,7 @@ function showError(message) {
     stopButton.disabled = false;
     stopButton.textContent = "Stop";
   }
-  runLabel.textContent = "Scan free";
+  runLabel.textContent = "Scan my website";
   window.clearInterval(timer);
   scrollChatToBottom();
 }

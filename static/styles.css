@@ -4602,6 +4602,35 @@ body::after {
   }
 }
 
+.input-prefix img {
+  animation: poro-hop 1.85s cubic-bezier(0.3, 0.7, 0.2, 1) infinite;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
+@keyframes poro-hop {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  18% {
+    transform: translateY(-9px) scale(1.03, 0.98);
+  }
+
+  30% {
+    transform: translateY(0) scale(0.98, 1.04);
+  }
+
+  42% {
+    transform: translateY(-4px) scale(1.01);
+  }
+
+  54% {
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

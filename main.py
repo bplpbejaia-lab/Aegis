@@ -158,6 +158,15 @@ class VisitorHeartbeatRequest(BaseModel):
     duration_seconds: int = Field(default=0, ge=0, le=86_400)
 
 
+class FunnelEventRequest(BaseModel):
+    event_name: str = Field(..., min_length=2, max_length=80)
+    path: str = Field(default="/", max_length=800)
+    target: str = Field(default="", max_length=2048)
+    engine: str = Field(default="", max_length=80)
+    validation_mode: str = Field(default="", max_length=80)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class PageParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -450,6 +459,26 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS funnel_events (
+                id BIGSERIAL PRIMARY KEY,
+                event_name TEXT NOT NULL,
+                visitor_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                ip_address TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
+                target TEXT NOT NULL DEFAULT '',
+                engine TEXT NOT NULL DEFAULT '',
+                validation_mode TEXT NOT NULL DEFAULT '',
+                utm_source TEXT NOT NULL DEFAULT '',
+                utm_medium TEXT NOT NULL DEFAULT '',
+                utm_campaign TEXT NOT NULL DEFAULT '',
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TEXT NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id)",
             "CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_unique_idx ON users(lower(username))",
@@ -464,6 +493,10 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS visitor_sessions_campaign_idx ON visitor_sessions(utm_source, utm_medium, utm_campaign)",
             "CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS activity_logs_user_id_idx ON activity_logs(user_id)",
+            "CREATE INDEX IF NOT EXISTS funnel_events_created_at_idx ON funnel_events(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS funnel_events_event_name_idx ON funnel_events(event_name)",
+            "CREATE INDEX IF NOT EXISTS funnel_events_visitor_id_idx ON funnel_events(visitor_id)",
+            "CREATE INDEX IF NOT EXISTS funnel_events_session_id_idx ON funnel_events(session_id)",
         ):
             connection.execute(statement)
         ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
@@ -837,6 +870,8 @@ def should_log_visit(request: Request) -> bool:
         return False
     if path == "/api/visitor/heartbeat":
         return False
+    if path == "/api/funnel":
+        return False
     if path.startswith("/static/") and not LOG_STATIC_VISITS:
         return False
     return True
@@ -903,7 +938,10 @@ def upsert_visitor_session(
             os = COALESCE(NULLIF(excluded.os, ''), visitor_sessions.os),
             user_agent = COALESCE(NULLIF(excluded.user_agent, ''), visitor_sessions.user_agent),
             referrer = COALESCE(NULLIF(visitor_sessions.referrer, ''), excluded.referrer),
-            last_path = excluded.last_path,
+            last_path = CASE
+                WHEN excluded.last_path LIKE '/api/%' THEN visitor_sessions.last_path
+                ELSE excluded.last_path
+            END,
             query_string = excluded.query_string,
             utm_source = COALESCE(NULLIF(visitor_sessions.utm_source, ''), excluded.utm_source),
             utm_medium = COALESCE(NULLIF(visitor_sessions.utm_medium, ''), excluded.utm_medium),
@@ -1050,7 +1088,9 @@ def log_activity(
 
 
 def update_visitor_heartbeat(request: Request, payload: VisitorHeartbeatRequest) -> None:
-    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip()
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip() or str(
+        getattr(request.state, "visitor_session_id", "")
+    ).strip()
     if not visitor_session_id:
         return
     now = utc_now()
@@ -1072,8 +1112,12 @@ def update_visitor_heartbeat(request: Request, payload: VisitorHeartbeatRequest)
 
 
 def mark_visitor_preorder_conversion(request: Request, user_id: int) -> None:
-    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip()
-    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME, "").strip()
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip() or str(
+        getattr(request.state, "visitor_session_id", "")
+    ).strip()
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME, "").strip() or str(
+        getattr(request.state, "visitor_id", "")
+    ).strip()
     try:
         with DB_LOCK, db_connect() as connection:
             if visitor_session_id:
@@ -1621,6 +1665,28 @@ ADMIN_SESSION_WINDOWS: dict[str, str] = {
     "month": "last_seen_at::timestamptz >= now() - interval '30 days'",
     "all": "TRUE",
 }
+ALLOWED_FUNNEL_EVENTS = (
+    "cta_viewed",
+    "cta_clicked",
+    "signup_opened",
+    "signup_completed",
+    "preorder_clicked",
+    "analysis_started",
+    "analysis_completed",
+)
+ADMIN_HUMAN_SESSION_FILTER = """
+NOT (
+    device_type = 'bot'
+    OR lower(user_agent) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
+    OR lower(coalesce(landing_path, '') || ' ' || coalesce(last_path, '') || ' ' || coalesce(query_string, '')) ~ '(^|/)(wp-[a-z0-9_-]+|xmlrpc|wlwmanifest)|/meta\\.json|(^|/)\\.env|(^|/)\\.git|config\\.js|config\\.json|settings\\.js|/api/config|/api/env|/js/env\\.js|/js/config\\.js|/sitemap|/robots\\.txt|/llms\\.txt|/\\.well-known/'
+)
+"""
+ADMIN_HUMAN_FUNNEL_FILTER = """
+NOT (
+    lower(user_agent) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
+    OR lower(coalesce(path, '')) ~ '(^|/)(wp-[a-z0-9_-]+|xmlrpc|wlwmanifest)|/meta\\.json|(^|/)\\.env|(^|/)\\.git|config\\.js|config\\.json|settings\\.js|/api/config|/api/env|/js/env\\.js|/js/config\\.js|/sitemap|/robots\\.txt|/llms\\.txt|/\\.well-known/'
+)
+"""
 
 
 def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]:
@@ -1662,6 +1728,128 @@ def preorder_aegis(user_id: int) -> dict[str, Any]:
     return serialize_user(updated)
 
 
+def log_funnel_event(
+    request: Request,
+    event_name: str,
+    payload: FunnelEventRequest | None = None,
+    user: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    clean_event = clamp_log_value(str(event_name or "").strip().lower(), 80)
+    if clean_event not in ALLOWED_FUNNEL_EVENTS:
+        raise HTTPException(status_code=400, detail="Unknown funnel event.")
+    payload = payload or FunnelEventRequest(event_name=clean_event)
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME, "").strip() or str(
+        getattr(request.state, "visitor_id", "")
+    ).strip()
+    visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME, "").strip() or str(
+        getattr(request.state, "visitor_session_id", "")
+    ).strip()
+    marketing = request_marketing_context(request)
+    user_id = int(user["id"]) if user else None
+    with DB_LOCK, db_connect() as connection:
+        if visitor_session_id:
+            session_row = connection.execute(
+                """
+                SELECT utm_source, utm_medium, utm_campaign
+                FROM visitor_sessions
+                WHERE session_id = %s
+                """,
+                (visitor_session_id,),
+            ).fetchone()
+            if session_row:
+                marketing = {
+                    "utm_source": session_row["utm_source"] or marketing["utm_source"],
+                    "utm_medium": session_row["utm_medium"] or marketing["utm_medium"],
+                    "utm_campaign": session_row["utm_campaign"] or marketing["utm_campaign"],
+                }
+        connection.execute(
+            """
+            INSERT INTO funnel_events (
+                event_name, visitor_id, session_id, user_id, ip_address, user_agent,
+                path, target, engine, validation_mode, utm_source, utm_medium,
+                utm_campaign, metadata, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                clean_event,
+                visitor_id,
+                visitor_session_id,
+                user_id,
+                client_ip(request),
+                request_user_agent(request),
+                clamp_log_value(payload.path or request.url.path, 800),
+                clamp_log_value(payload.target, 2048),
+                clamp_log_value(payload.engine, 80),
+                clamp_log_value(payload.validation_mode, 80),
+                marketing["utm_source"],
+                marketing["utm_medium"],
+                marketing["utm_campaign"],
+                Jsonb(safe_metadata(metadata or payload.metadata or {})),
+                utc_now(),
+            ),
+        )
+        connection.commit()
+
+
+def safe_log_funnel_event(
+    request: Request,
+    event_name: str,
+    payload: FunnelEventRequest | None = None,
+    user: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        log_funnel_event(request, event_name, payload, user, metadata)
+    except Exception as exc:
+        print(f"Aegis funnel logging failed: {exc}")
+
+
+def admin_funnel_insights(connection: psycopg.Connection) -> dict[str, Any]:
+    insights: dict[str, Any] = {}
+    for window_id, session_clause in ADMIN_SESSION_WINDOWS.items():
+        time_clause = session_clause.replace("last_seen_at", "created_at")
+        event_rows = connection.execute(
+            f"""
+            SELECT
+                event_name,
+                COUNT(*)::int AS events,
+                COUNT(DISTINCT visitor_id)::int AS visitors
+            FROM funnel_events
+            WHERE ({time_clause}) AND {ADMIN_HUMAN_FUNNEL_FILTER}
+            GROUP BY event_name
+            ORDER BY events DESC
+            """
+        ).fetchall()
+        campaign_rows = connection.execute(
+            f"""
+            SELECT
+                COALESCE(NULLIF(utm_source, ''), 'direct') AS source,
+                COALESCE(NULLIF(utm_medium, ''), 'none') AS medium,
+                COALESCE(NULLIF(utm_campaign, ''), 'none') AS campaign,
+                event_name,
+                COUNT(*)::int AS events,
+                COUNT(DISTINCT visitor_id)::int AS visitors
+            FROM funnel_events
+            WHERE ({time_clause}) AND {ADMIN_HUMAN_FUNNEL_FILTER}
+            GROUP BY 1, 2, 3, 4
+            ORDER BY events DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        ordered = [name for name in ALLOWED_FUNNEL_EVENTS]
+        event_map = {row["event_name"]: row_to_dict(row) for row in event_rows}
+        insights[window_id] = {
+            "events": [
+                event_map.get(name, {"event_name": name, "events": 0, "visitors": 0})
+                for name in ordered
+            ],
+            "campaigns": [row_to_dict(row) for row in campaign_rows],
+        }
+    return insights
+
+
 def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
     insights: dict[str, Any] = {}
     for window_id, session_clause in ADMIN_SESSION_WINDOWS.items():
@@ -1681,7 +1869,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE page_views <= 1 AND duration_seconds < 15)::int AS bounce_sessions,
                 COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS preorder_conversions
             FROM visitor_sessions
-            WHERE {session_clause}
+            WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
             """
         ).fetchone()
         visitors = connection.execute(
@@ -1710,7 +1898,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 (ARRAY_AGG(landing_path ORDER BY started_at ASC))[1] AS landing_path,
                 (ARRAY_AGG(last_path ORDER BY last_seen_at DESC))[1] AS last_path
             FROM visitor_sessions
-            WHERE {session_clause}
+            WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
             GROUP BY visitor_id
             ORDER BY last_seen_at DESC
             LIMIT 100
@@ -1724,7 +1912,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 last_path, utm_source, utm_medium, utm_campaign, started_at, last_seen_at,
                 duration_seconds, page_views, converted_preorder
             FROM visitor_sessions
-            WHERE {session_clause}
+            WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
             ORDER BY last_seen_at DESC
             LIMIT 120
             """
@@ -1741,7 +1929,7 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
                 COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
                 COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
             FROM visitor_sessions
-            WHERE {session_clause}
+            WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
             GROUP BY 1, 2, 3
             ORDER BY sessions DESC, conversions DESC
             LIMIT 24
@@ -1787,17 +1975,20 @@ def admin_dashboard_payload() -> dict[str, Any]:
             """
         ).fetchall()
         summary = connection.execute(
-            """
+            f"""
             SELECT
                 (SELECT COUNT(*) FROM analysis_runs) AS runs,
                 (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
+                (SELECT COUNT(*) FROM users WHERE is_admin = FALSE) AS user_accounts,
                 (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
-                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_sessions) AS unique_visitors,
-                (SELECT COUNT(*) FROM visitor_sessions) AS visitor_sessions,
-                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions) AS avg_session_seconds
+                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS unique_visitors,
+                (SELECT COUNT(*) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS visitor_sessions,
+                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS avg_session_seconds,
+                (SELECT COUNT(*) FROM visitor_sessions WHERE NOT ({ADMIN_HUMAN_SESSION_FILTER})) AS filtered_noise_sessions
             """
         ).fetchone()
         visitor_insights = admin_visitor_insights(connection)
+        funnel_insights = admin_funnel_insights(connection)
 
     return {
         "summary": row_to_dict(summary),
@@ -1805,6 +1996,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
         "live_runs": [row_to_dict(row) for row in live_rows],
         "recent_runs": [row_to_dict(row) for row in run_rows],
         "visitor_insights": visitor_insights,
+        "funnel_insights": funnel_insights,
         "generated_at": now,
     }
 
@@ -1818,6 +2010,8 @@ init_db()
 async def capture_visit_events(request: Request, call_next):
     visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or secrets.token_urlsafe(18)
     visitor_session_id = request.cookies.get(VISITOR_SESSION_COOKIE_NAME) or secrets.token_urlsafe(18)
+    request.state.visitor_id = visitor_id
+    request.state.visitor_session_id = visitor_session_id
     should_set_cookie = VISITOR_COOKIE_NAME not in request.cookies
     should_set_session_cookie = VISITOR_SESSION_COOKIE_NAME not in request.cookies
     status_code = 500
@@ -1864,6 +2058,13 @@ def api_visitor_heartbeat(request: Request, payload: VisitorHeartbeatRequest) ->
     return {"ok": True}
 
 
+@app.post("/api/funnel")
+def api_funnel_event(request: Request, payload: FunnelEventRequest) -> dict[str, bool]:
+    user = authenticate_request(request)
+    log_funnel_event(request, payload.event_name, payload, user)
+    return {"ok": True}
+
+
 @app.get("/api/config")
 def api_config() -> dict[str, Any]:
     return {
@@ -1894,6 +2095,12 @@ def api_signup(request: Request, payload: SignupRequest) -> dict[str, Any]:
         int(user["id"]),
         request,
         {"username": user["username"], "provider": user["provider"], "plan": user["plan"]["id"]},
+    )
+    safe_log_funnel_event(
+        request,
+        "signup_completed",
+        user=user,
+        metadata={"provider": user["provider"], "plan": user["plan"]["id"]},
     )
     return {"token": token, "user": user}
 
@@ -1963,6 +2170,7 @@ async def api_google(request: Request, payload: GoogleAuthRequest) -> dict[str, 
 
     now = utc_now()
     plan_id = normalize_plan(payload.plan)
+    created_account = False
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
             """
@@ -1998,6 +2206,7 @@ async def api_google(request: Request, payload: GoogleAuthRequest) -> dict[str, 
             if not created:
                 raise HTTPException(status_code=409, detail="Account already exists.")
             user_id = int(created["id"])
+            created_account = True
         connection.commit()
         row = connection.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     token = create_session(user_id)
@@ -2009,6 +2218,13 @@ async def api_google(request: Request, payload: GoogleAuthRequest) -> dict[str, 
         request,
         {"username": user["username"], "email": user["email"], "plan": user["plan"]["id"]},
     )
+    if created_account:
+        safe_log_funnel_event(
+            request,
+            "signup_completed",
+            user=user,
+            metadata={"provider": user["provider"], "plan": user["plan"]["id"]},
+        )
     return {"token": token, "user": user}
 
 
@@ -2275,6 +2491,24 @@ async def run_analysis(
             quota_limit=quota.get("limit"),
             quota_remaining=quota.get("remaining"),
         )
+        safe_log_funnel_event(
+            request,
+            "analysis_started",
+            FunnelEventRequest(
+                event_name="analysis_started",
+                path=request.url.path,
+                target=target_url,
+                engine=selected_engine,
+                validation_mode=validation_mode,
+            ),
+            auth_context,
+            {
+                "run_id": run_id,
+                "quota_plan": quota.get("plan"),
+                "quota_remaining": quota.get("remaining"),
+                "proof_authorized": payload.proof_authorized,
+            },
+        )
         step.update(
             {
                 "status": "complete",
@@ -2401,6 +2635,23 @@ async def run_analysis(
                     "run_id": run_id,
                     "target": target_url,
                     "engine": selected_engine,
+                    "duration_ms": elapsed_ms,
+                    "score": direct_report.get("score", 0),
+                },
+            )
+            safe_log_funnel_event(
+                request,
+                "analysis_completed",
+                FunnelEventRequest(
+                    event_name="analysis_completed",
+                    path=request.url.path,
+                    target=target_url,
+                    engine=selected_engine,
+                    validation_mode=validation_mode,
+                ),
+                auth_context,
+                {
+                    "run_id": run_id,
                     "duration_ms": elapsed_ms,
                     "score": direct_report.get("score", 0),
                 },
@@ -2605,6 +2856,23 @@ async def run_analysis(
                 "run_id": run_id,
                 "target": target_url,
                 "engine": selected_engine,
+                "duration_ms": elapsed_ms,
+                "score": local_report.get("score", 0),
+            },
+        )
+        safe_log_funnel_event(
+            request,
+            "analysis_completed",
+            FunnelEventRequest(
+                event_name="analysis_completed",
+                path=request.url.path,
+                target=target_url,
+                engine=selected_engine,
+                validation_mode=validation_mode,
+            ),
+            auth_context,
+            {
+                "run_id": run_id,
                 "duration_ms": elapsed_ms,
                 "score": local_report.get("score", 0),
             },
