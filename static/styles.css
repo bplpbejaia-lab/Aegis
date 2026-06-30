@@ -4649,15 +4649,15 @@ body::after {
 .message-avatar {
   overflow: hidden;
   background:
-    #111111
-    url("/static/assets/aelyx-mark.svg") center / 86% no-repeat;
+    #ffffff
+    url("/static/assets/aegis-fluffy-companion-256.png") center / 84% no-repeat;
   color: transparent !important;
   font-size: 0 !important;
 }
 
 .input-prefix {
   overflow: hidden;
-  background: #111111;
+  background: #ffffff;
 }
 
 .input-prefix img {
@@ -4671,8 +4671,8 @@ body::after {
 
 .thinking-orbit::after {
   background:
-    #111111
-    url("/static/assets/aelyx-mark.svg") center / 86% no-repeat;
+    #ffffff
+    url("/static/assets/aegis-fluffy-companion-256.png") center / 84% no-repeat;
   content: "";
 }
 
