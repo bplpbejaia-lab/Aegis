@@ -2329,16 +2329,16 @@ function setReportModeLabels(report) {
   if (kicker) kicker.textContent = isDirect ? `${engineName} direct report` : "Aelyx report";
   const labels = isDirect
     ? [
+        ["Impact map", "Abuse scenarios"],
         ["Report overview", `Parsed ${engineName} findings`],
         ["Findings by severity", "Critical to low"],
         ["Evidence and remediation", "Plan, logs, validation"],
-        ["Impact map", "Abuse scenarios"],
       ]
     : [
+        ["Impact map", "Abuse scenarios"],
         ["Facts", "Passive evidence"],
         ["Security findings", "Classified issues"],
         ["Recommended architecture", "Hosting and edge hardening"],
-        ["Impact map", "Abuse scenarios"],
       ];
   labels.forEach(([title, subtitle], index) => {
     const section = sections[index];
@@ -2651,19 +2651,78 @@ function renderDirectFindings(parsed, engineName = "Aelyx") {
 }
 
 function renderDirectFindingCard(finding) {
+  const education = findingEducation(finding);
   return `
     <article class="direct-finding-card ${escapeHtml(finding.severity)} report-searchable">
-      <div class="finding-topline">
-        <h3>${escapeHtml(finding.title)}</h3>
-        <span class="severity-tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
-      </div>
-      ${renderFindingField("Evidence", finding.evidence)}
-      ${renderFindingField("How it could be used", finding.usage)}
-      ${renderFindingField("Impact", finding.impact)}
-      ${renderFindingField("Fix", finding.fix)}
-      ${renderFindingField("Confidence", finding.confidence)}
+      <details>
+        <summary class="finding-topline">
+          <h3>${escapeHtml(finding.title)}</h3>
+          <span class="severity-tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+        </summary>
+        <div class="finding-visual ${escapeHtml(finding.severity)}" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="finding-explain">
+          <div><b>Meaning</b><p>${escapeHtml(education.meaning)}</p></div>
+          <div><b>Risk</b><p>${escapeHtml(education.risk)}</p></div>
+          <div><b>Fix first</b><p>${escapeHtml(education.fix)}</p></div>
+        </div>
+        ${renderFindingField("Evidence", finding.evidence)}
+        ${renderFindingField("How it could be used", finding.usage)}
+        ${renderFindingField("Impact", finding.impact)}
+        ${renderFindingField("Fix", finding.fix)}
+        ${renderFindingField("Confidence", finding.confidence)}
+      </details>
     </article>
   `;
+}
+
+function findingEducation(finding) {
+  const text = [finding.title, finding.evidence, finding.usage, finding.impact, finding.fix]
+    .join(" ")
+    .toLowerCase();
+  if (/script|xss|csp|unsafe-inline|javascript|content security policy/.test(text)) {
+    return {
+      meaning: "The browser may allow script behavior that is harder to control.",
+      risk: "If another bug lets code enter the page, weak script policy can make visitor-side compromise easier.",
+      fix: "Tighten CSP, remove unsafe inline script patterns where possible, and allow scripts only from trusted sources.",
+    };
+  }
+  if (/hsts|tls|ssl|certificate|https|mixed content/.test(text)) {
+    return {
+      meaning: "The secure connection layer needs stronger guarantees.",
+      risk: "Visitors may be easier to redirect, downgrade, or confuse if HTTPS policy is incomplete.",
+      fix: "Enforce HTTPS, keep HSTS correct, monitor certificates, and remove mixed-content paths.",
+    };
+  }
+  if (/cookie|session|auth|login|csrf|account|admin/.test(text)) {
+    return {
+      meaning: "The finding touches login, session, or privileged user behavior.",
+      risk: "Attackers focus on these areas because they can lead to account access or unauthorized actions.",
+      fix: "Harden cookies, CSRF protections, MFA, admin exposure, and rate limits around sensitive actions.",
+    };
+  }
+  if (/dns|caa|dnssec|mx|ns|domain/.test(text)) {
+    return {
+      meaning: "The domain safety layer can be made stricter.",
+      risk: "DNS and certificate-control gaps can make spoofing, misrouting, or certificate mistakes harder to detect.",
+      fix: "Review DNSSEC, CAA, nameservers, and certificate issuance controls.",
+    };
+  }
+  if (/header|clickjacking|x-frame|mime|referrer|permissions/.test(text)) {
+    return {
+      meaning: "A browser protection header is missing or too loose.",
+      risk: "These headers reduce common browser-side abuse paths such as framing, data leakage, or unsafe content handling.",
+      fix: "Set the missing security headers at the edge or web server and monitor them in deployment checks.",
+    };
+  }
+  return {
+    meaning: "This is a security hardening gap observed from public evidence.",
+    risk: "It may not be exploitable alone, but it can combine with other weaknesses and increase real-world risk.",
+    fix: "Prioritize the remediation plan, validate the finding, then add a regression check so it does not return.",
+  };
 }
 
 function renderDirectSupportSections(parsed) {
@@ -2719,17 +2778,44 @@ function renderImpactPanel(findings) {
       ${impacts
         .map((impact) => {
           const width = impact.score ? Math.max(8, Math.round((impact.score / maxScore) * 100)) : 0;
-          const examples = impact.examples.slice(0, 2).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+          const examples = impact.examples.slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+          const detail = impactEducation(impact);
+          const active = impact.count > 0;
           return `
-            <article class="impact-card ${escapeHtml(impact.id)} report-searchable" style="--impact: ${width}%">
-              <div class="impact-head">
-                <span>${escapeHtml(impact.badge)}</span>
-                <strong>${escapeHtml(impact.label)}</strong>
-              </div>
-              <p>${escapeHtml(impact.description)}</p>
-              <div class="impact-meter" aria-hidden="true"><i></i></div>
-              <small>${impact.count} linked finding${impact.count === 1 ? "" : "s"}</small>
-              ${examples ? `<ul>${examples}</ul>` : ""}
+            <article class="impact-card ${escapeHtml(impact.id)} ${active ? "has-findings" : "is-quiet"} report-searchable" style="--impact: ${width}%">
+              <details ${active ? "" : ""}>
+                <summary>
+                  <span class="impact-badge">${escapeHtml(impact.badge)}</span>
+                  <strong>${escapeHtml(impact.label)}</strong>
+                  <small>${impact.count} linked finding${impact.count === 1 ? "" : "s"}</small>
+                  <p class="impact-teaser">${escapeHtml(impact.description)}</p>
+                  <div class="impact-meter" aria-hidden="true"><i></i></div>
+                </summary>
+                <div class="impact-visual" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+                <div class="impact-explain">
+                  <div>
+                    <b>What this means</b>
+                    <p>${escapeHtml(detail.meaning)}</p>
+                  </div>
+                  <div>
+                    <b>Why it matters</b>
+                    <p>${escapeHtml(detail.risk)}</p>
+                  </div>
+                  <div>
+                    <b>First fix</b>
+                    <p>${escapeHtml(detail.fix)}</p>
+                  </div>
+                </div>
+                ${
+                  examples
+                    ? `<div class="impact-linked"><b>Linked evidence</b><ul>${examples}</ul></div>`
+                    : `<p class="impact-empty">No linked finding in this scenario right now.</p>`
+                }
+              </details>
             </article>
           `;
         })
@@ -2797,7 +2883,44 @@ function buildImpactScores(findings) {
       if (impact.examples.length < 3) impact.examples.push(finding.title);
     });
   });
-  return catalog.sort((left, right) => right.score - left.score || right.count - left.count);
+  return catalog.sort((left, right) => {
+    if (left.count && !right.count) return -1;
+    if (!left.count && right.count) return 1;
+    if (left.id === "content" && left.count && right.count) return -1;
+    if (right.id === "content" && left.count && right.count) return 1;
+    return right.score - left.score || right.count - left.count;
+  });
+}
+
+function impactEducation(impact) {
+  const map = {
+    data: {
+      meaning: "Information could be exposed or collected in a way users did not expect.",
+      risk: "For a non-technical owner, this can mean privacy complaints, leaked emails, tokens, or sensitive records becoming visible.",
+      fix: "Reduce exposed data, lock down public API responses, and make sure secrets never appear in pages, scripts, logs, or backups.",
+    },
+    content: {
+      meaning: "A weakness could let someone change what visitors see or inject code into the page.",
+      risk: "This can lead to defacement, fake login prompts, malicious JavaScript, brand damage, or visitors being redirected.",
+      fix: "Start with CSP/script hardening, remove unsafe inline script patterns where possible, and lock down edit/upload/admin paths.",
+    },
+    account: {
+      meaning: "The finding touches login, session, admin, or access-control behavior.",
+      risk: "Attackers may try to reuse weak session behavior, missing protections, or exposed admin flows to compromise accounts.",
+      fix: "Harden cookies, auth flows, admin access, CSRF protections, MFA, and rate limits around sensitive actions.",
+    },
+    availability: {
+      meaning: "The site may have public surfaces that are easy to overload or abuse.",
+      risk: "The business impact is downtime: slow pages, failed forms, blocked customers, or higher infrastructure cost.",
+      fix: "Put rate limits, caching, WAF rules, and bot controls in front of expensive or public endpoints.",
+    },
+    edge: {
+      meaning: "Browser, TLS, DNS, and response-header protections are the outer safety layer of the site.",
+      risk: "These gaps may not be a breach alone, but they make phishing, injection, clickjacking, or downgrade scenarios easier.",
+      fix: "Tune HSTS, CSP, clickjacking, MIME, referrer, permissions, DNSSEC/CAA, and server header exposure at the edge.",
+    },
+  };
+  return map[impact.id] || map.edge;
 }
 
 function findingImpactTypes(finding) {
