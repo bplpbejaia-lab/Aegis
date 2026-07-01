@@ -224,6 +224,24 @@ const SCAN_STEP_META = {
     completeTitle: "Surface mapped",
     runningDetail: "Checking DNS records, robots.txt, WordPress hints, public endpoints, and client asset integrity.",
   },
+  agent_strategy: {
+    label: "Strategy",
+    runningTitle: "LLM choosing approach",
+    completeTitle: "LLM strategy ready",
+    runningDetail: "The model is deciding which risk paths, tools, and evidence matter most for this target.",
+  },
+  agent_toolbox: {
+    label: "Tools",
+    runningTitle: "Running chosen tools",
+    completeTitle: "Tool evidence ready",
+    runningDetail: "Executing authorized DNS, TLS, HTTP, CORS, crawl, JavaScript, API, CMS, and public exposure checks.",
+  },
+  evidence_fallback: {
+    label: "Evidence",
+    runningTitle: "Returning tool evidence",
+    completeTitle: "Evidence report ready",
+    runningDetail: "The final model provider did not complete, so Aelyx is returning the collected evidence report.",
+  },
   headers: {
     label: "Headers",
     runningTitle: "Classifying evidence",
@@ -240,13 +258,13 @@ const SCAN_STEP_META = {
     label: "Aelyx",
     runningTitle: "Aelyx engine working",
     completeTitle: "Aelyx engine finished",
-    runningDetail: "The agent is collecting public evidence, checking safe paths, and preparing the report. This can take a few minutes.",
+    runningDetail: "The LLM is synthesizing its strategy and tool evidence into the final report. This can take a few minutes.",
   },
   sheepstealer_direct: {
     label: "sheepstealer",
     runningTitle: "sheepstealer working",
     completeTitle: "sheepstealer finished",
-    runningDetail: "The hosted engine is reviewing public evidence and writing the report. This can take a few minutes when the provider is busy.",
+    runningDetail: "The hosted LLM is synthesizing its strategy and tool evidence into the final report. This can take a few minutes when the provider is busy.",
   },
 };
 let runStartedAt = 0;
@@ -2195,6 +2213,8 @@ function applyThinkingMood(mood) {
 function moodForStep(stepId) {
   const map = {
     scope: 0,
+    agent_strategy: 1,
+    agent_toolbox: 4,
     dns: 1,
     http: 2,
     tls: 3,
@@ -2227,6 +2247,9 @@ function setThinkingStage(activeIndex) {
 
 function stageIndexForStep(stepId, status = "running") {
   if (["scope"].includes(stepId)) return 0;
+  if (["agent_strategy"].includes(stepId)) return status === "complete" ? 2 : 1;
+  if (["agent_toolbox"].includes(stepId)) return status === "complete" ? 3 : 2;
+  if (["evidence_fallback"].includes(stepId)) return 3;
   if (DIRECT_STEP_IDS.has(stepId)) return status === "complete" ? 4 : 2;
   if (["dns", "http", "tls", "surface"].includes(stepId)) {
     return 1;

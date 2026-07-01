@@ -94,6 +94,13 @@ HF_SOCKET_CONNECT_TIMEOUT_SECONDS = max(
 HF_SOCKET_READ_TIMEOUT_SECONDS = max(
     30.0, float(os.getenv("AEGIS_HF_READ_TIMEOUT_SECONDS", "240"))
 )
+AGENT_STRATEGY_TIMEOUT_SECONDS = max(
+    30.0, float(os.getenv("AEGIS_AGENT_STRATEGY_TIMEOUT_SECONDS", "90"))
+)
+AGENT_STRATEGY_MAX_ATTEMPTS = max(1, int(os.getenv("AEGIS_AGENT_STRATEGY_MAX_ATTEMPTS", "3")))
+ADVANCED_RECON_PAGE_LIMIT = max(2, int(os.getenv("AEGIS_ADVANCED_RECON_PAGE_LIMIT", "8")))
+ADVANCED_RECON_JS_LIMIT = max(1, int(os.getenv("AEGIS_ADVANCED_RECON_JS_LIMIT", "6")))
+ADVANCED_RECON_PROBE_LIMIT = max(12, int(os.getenv("AEGIS_ADVANCED_RECON_PROBE_LIMIT", "34")))
 DOH_ENDPOINTS = [
     ("https://8.8.8.8/resolve", {}),
     ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
@@ -2913,12 +2920,98 @@ async def run_analysis(
                 if is_sheepstealer
                 else "Passing the authorized target directly to Aelyx for end-to-end analysis."
             )
+            strategy_step = record_step(
+                "agent_strategy",
+                "LLM strategy planning",
+                "llm_strategy",
+                "running",
+                (
+                    "The LLM is choosing the assessment approach, priority risks, "
+                    "and evidence it wants from the tool layer."
+                ),
+            )
+            yield event("step", strategy_step)
+            agent_strategy = await asyncio.to_thread(
+                call_direct_agent_strategy,
+                target_url,
+                validation_mode,
+                payload.proof_authorized,
+                is_sheepstealer,
+            )
+            cancelled_event = await cancellation_event_if_needed()
+            if cancelled_event:
+                yield cancelled_event
+                return
+            strategy_step.update(
+                {
+                    "status": "complete",
+                    "detail": build_strategy_step_detail(agent_strategy),
+                    "result": {
+                        "model": agent_strategy.get("model", ""),
+                        "skipped": agent_strategy.get("skipped", False),
+                        "error": agent_strategy.get("error", ""),
+                        "preview": llm_preview(agent_strategy.get("content", ""), 260),
+                    },
+                }
+            )
+            yield event("step", strategy_step)
+
+            toolbox_step = record_step(
+                "agent_toolbox",
+                "LLM-guided tool run",
+                "authorized_toolbox",
+                "running",
+                (
+                    "Executing the authorized tool layer requested for deep evidence: "
+                    "DNS, TLS, headers, CORS, robots, sitemap, public files, same-origin pages, "
+                    "JavaScript endpoints, and CMS signals."
+                ),
+            )
+            yield event("step", toolbox_step)
+            toolbox_report = await asyncio.to_thread(collect_passive_report, target_url)
+            toolbox_report.setdefault("surface", {})
+            toolbox_report["surface"]["agent_strategy"] = agent_strategy
+            cancelled_event = await cancellation_event_if_needed()
+            if cancelled_event:
+                yield cancelled_event
+                return
+            advanced = toolbox_report.get("surface", {}).get("advanced", {})
+            toolbox_step.update(
+                {
+                    "status": "complete",
+                    "detail": (
+                        "LLM tool evidence ready: "
+                        f"{len(toolbox_report.get('vulnerabilities', []))} finding(s), "
+                        f"{len(advanced.get('crawl', []))} page(s), "
+                        f"{len(advanced.get('javascript', []))} JavaScript asset(s), "
+                        f"{len(advanced.get('public_exposures', []))} exposure signal(s)."
+                    ),
+                    "result": {
+                        "score": toolbox_report.get("score", 0),
+                        "severity_counts": toolbox_report.get("severity_counts", {}),
+                        "toolbox": advanced.get("toolbox", []),
+                        "crawl_count": len(advanced.get("crawl", [])),
+                        "javascript_count": len(advanced.get("javascript", [])),
+                        "public_exposure_count": len(advanced.get("public_exposures", [])),
+                    },
+                }
+            )
+            yield event("step", toolbox_step)
+            yield event("metrics", toolbox_report["summary"])
+            cancelled_event = await cancellation_event_if_needed()
+            if cancelled_event:
+                yield cancelled_event
+                return
+
             step = record_step(
                 step_id,
                 engine_title,
                 engine_tool,
                 "running",
-                engine_detail,
+                (
+                    f"{engine_detail} The final model pass receives its strategy, "
+                    "tool observations, and evidence matrix."
+                ),
             )
             yield event("step", step)
             direct_started_at = time.perf_counter()
@@ -2933,6 +3026,7 @@ async def run_analysis(
                     validation_mode,
                     payload.proof_authorized,
                     DIRECT_ENGINE_TIMEOUT_SECONDS,
+                    toolbox_report,
                 )
             )
             llm_context: dict[str, Any] | None = None
@@ -3021,19 +3115,19 @@ async def run_analysis(
             )
             yield event("step", step)
 
-            if direct_engine_needs_passive_fallback(llm_context):
+            if direct_engine_needs_evidence_fallback(llm_context):
                 fallback_step = record_step(
-                    "passive_fallback",
-                    "Deterministic fallback scan",
-                    "passive_scanner",
+                    "evidence_fallback",
+                    "Evidence report fallback",
+                    "authorized_toolbox",
                     "running",
-                    "The AI provider did not return a full report, so Aelyx is collecting DNS, HTTP, TLS, headers, and surface evidence locally.",
+                    (
+                        "The final LLM provider did not return a full report, so Aelyx "
+                        "is returning the already-collected tool evidence instead of leaving the run empty."
+                    ),
                 )
                 yield event("step", fallback_step)
-                fallback_report = await asyncio.to_thread(
-                    collect_passive_report,
-                    target_url,
-                )
+                fallback_report = toolbox_report
                 cancelled_event = await cancellation_event_if_needed()
                 if cancelled_event:
                     yield cancelled_event
@@ -3045,7 +3139,7 @@ async def run_analysis(
                 fallback_report.setdefault("surface", {})
                 fallback_report["surface"].update(
                     {
-                        "analysis_mode": "deterministic_fallback",
+                        "analysis_mode": "tool_evidence_fallback",
                         "requested_analysis_mode": step_id,
                         "validation_mode": validation_mode,
                         "proof_authorized": payload.proof_authorized,
@@ -3056,8 +3150,8 @@ async def run_analysis(
                     {
                         "status": "complete",
                         "detail": (
-                            "Fallback scan complete: "
-                            f"classified {len(fallback_report.get('vulnerabilities', []))} passive finding(s)."
+                            "Fallback evidence ready: "
+                            f"classified {len(fallback_report.get('vulnerabilities', []))} tool-backed finding(s)."
                         ),
                         "result": {
                             "score": fallback_report.get("score", 0),
@@ -3078,7 +3172,7 @@ async def run_analysis(
                         "engine": selected_engine,
                         "duration_ms": elapsed_ms,
                         "score": fallback_report.get("score", 0),
-                        "fallback": "deterministic",
+                        "fallback": "tool_evidence",
                     },
                 )
                 safe_log_funnel_event(
@@ -3096,7 +3190,7 @@ async def run_analysis(
                         "run_id": run_id,
                         "duration_ms": elapsed_ms,
                         "score": fallback_report.get("score", 0),
-                        "fallback": "deterministic",
+                        "fallback": "tool_evidence",
                     },
                 )
                 yield event("metrics", fallback_report["summary"])
@@ -3120,6 +3214,7 @@ async def run_analysis(
                     else "Aelyx direct analysis"
                 ),
                 reason_phrase="sheepstealer" if is_sheepstealer else "Aelyx Engine",
+                evidence_report=toolbox_report,
             )
             finish_analysis_run(run_id, "completed", elapsed_ms, direct_report)
             log_activity(
@@ -3433,7 +3528,7 @@ def collect_passive_report(target_url: str) -> dict[str, Any]:
     )
 
 
-def direct_engine_needs_passive_fallback(llm_context: dict[str, Any]) -> bool:
+def direct_engine_needs_evidence_fallback(llm_context: dict[str, Any]) -> bool:
     return bool(llm_context.get("skipped") or llm_context.get("error"))
 
 
@@ -3726,6 +3821,108 @@ def fetch_site(target_url: str, dns_context: dict[str, Any] | None = None) -> di
         return fetch_site_via_resolved_ip(target_url, dns_context, started_at)
 
 
+def fetch_probe_context(
+    target_url: str,
+    dns_context: dict[str, Any] | None = None,
+    method: str = "GET",
+    extra_headers: dict[str, str] | None = None,
+    connect_timeout: float = 4.0,
+    read_timeout: float = 5.0,
+    max_body_bytes: int = 160_000,
+) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    method = normalize_http_method(method)
+    if (
+        dns_context
+        and dns_context.get("ips")
+        and dns_context.get("resolver") not in {"system", "literal"}
+    ):
+        return fetch_site_via_resolved_ip(
+            target_url,
+            dns_context,
+            started_at,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            max_body_bytes=max_body_bytes,
+            method=method,
+            extra_headers=extra_headers,
+        )
+
+    headers = {
+        "User-Agent": "AelyxResearchAudit/1.0 (+safe-recon)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+    }
+    headers.update(sanitize_extra_headers(extra_headers or {}))
+    try:
+        with httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
+            verify=True,
+        ) as client:
+            with client.stream(method, target_url) as response:
+                body = bytearray()
+                if method != "HEAD":
+                    for chunk in response.iter_bytes():
+                        if not chunk:
+                            continue
+                        remaining = max_body_bytes - len(body)
+                        if remaining <= 0:
+                            break
+                        body.extend(chunk[:remaining])
+
+                encoding = response.encoding or "utf-8"
+                text = bytes(body).decode(encoding, errors="replace")
+                header_dict = {
+                    key.lower(): value for key, value in response.headers.multi_items()
+                }
+                set_cookies = response.headers.get_list("set-cookie")
+                return {
+                    "status_code": response.status_code,
+                    "reason_phrase": response.reason_phrase,
+                    "final_url": str(response.url),
+                    "history": [str(item.url) for item in response.history],
+                    "headers": header_dict,
+                    "set_cookies": set_cookies,
+                    "body_sample": text,
+                    "body_bytes_read": len(body),
+                    "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                    "transport": "httpx",
+                    "method": method,
+                }
+    except httpx.RequestError:
+        if not dns_context or not dns_context.get("ips"):
+            raise
+        return fetch_site_via_resolved_ip(
+            target_url,
+            dns_context,
+            started_at,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            max_body_bytes=max_body_bytes,
+            method=method,
+            extra_headers=extra_headers,
+        )
+
+
+def normalize_http_method(method: str) -> str:
+    normalized = str(method or "GET").strip().upper()
+    if normalized not in {"GET", "HEAD", "OPTIONS"}:
+        return "GET"
+    return normalized
+
+
+def sanitize_extra_headers(headers: dict[str, str]) -> dict[str, str]:
+    clean: dict[str, str] = {}
+    for key, value in headers.items():
+        header_name = re.sub(r"[^A-Za-z0-9-]", "", str(key or ""))
+        if not header_name:
+            continue
+        header_value = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        clean[header_name] = header_value[:300]
+    return clean
+
+
 def fetch_site_via_resolved_ip(
     target_url: str,
     dns_context: dict[str, Any],
@@ -3733,6 +3930,8 @@ def fetch_site_via_resolved_ip(
     connect_timeout: float = 8.0,
     read_timeout: float = 8.0,
     max_body_bytes: int = MAX_BODY_BYTES,
+    method: str = "GET",
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     parsed = urlparse(target_url)
     hostname = parsed.hostname
@@ -3745,6 +3944,10 @@ def fetch_site_via_resolved_ip(
     host_header = hostname
     if parsed.port and parsed.port not in {80, 443}:
         host_header = f"{hostname}:{parsed.port}"
+    method = normalize_http_method(method)
+    header_lines = ""
+    for key, value in sanitize_extra_headers(extra_headers or {}).items():
+        header_lines += f"{key}: {value}\r\n"
 
     raw = b""
     last_error: Exception | None = None
@@ -3761,11 +3964,12 @@ def fetch_site_via_resolved_ip(
                 with conn:
                     conn.settimeout(read_timeout)
                     request = (
-                        f"GET {path} HTTP/1.1\r\n"
+                        f"{method} {path} HTTP/1.1\r\n"
                         f"Host: {host_header}\r\n"
-                        "User-Agent: AelyxResearchAudit/1.0 (+passive-security-analysis)\r\n"
+                        "User-Agent: AelyxResearchAudit/1.0 (+safe-recon)\r\n"
                         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
                         "Accept-Encoding: identity\r\n"
+                        f"{header_lines}"
                         "Connection: close\r\n\r\n"
                     )
                     conn.sendall(request.encode("ascii"))
@@ -3826,6 +4030,7 @@ def fetch_site_via_resolved_ip(
         "body_bytes_read": len(body),
         "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
         "transport": "resolved_ip_sni",
+        "method": method,
     }
 
 
@@ -4019,6 +4224,9 @@ def passive_surface_checks(
 
     probe_specs = [
         ("robots_txt", "/robots.txt"),
+        ("sitemap_xml", "/sitemap.xml"),
+        ("security_txt", "/.well-known/security.txt"),
+        ("root_security_txt", "/security.txt"),
         ("wp_json", "/wp-json/"),
         ("wp_users", "/wp-json/wp/v2/users?per_page=5"),
         ("xmlrpc", "/xmlrpc.php"),
@@ -4026,13 +4234,80 @@ def passive_surface_checks(
         ("author_1", "/?author=1"),
         ("debug_log", "/wp-content/debug.log"),
         ("uploads_root", "/wp-content/uploads/"),
+        ("env_file", "/.env"),
+        ("git_config", "/.git/config"),
+        ("phpinfo", "/phpinfo.php"),
+        ("composer_lock", "/composer.lock"),
+        ("package_lock", "/package-lock.json"),
+        ("yarn_lock", "/yarn.lock"),
+        ("openapi_json", "/openapi.json"),
+        ("swagger_json", "/swagger.json"),
+        ("swagger_ui", "/swagger/"),
+        ("graphql", "/graphql"),
+        ("admin_root", "/admin/"),
+        ("login_root", "/login"),
+        ("backup_zip", "/backup.zip"),
+        ("database_sql", "/database.sql"),
+        ("db_sql", "/db.sql"),
+        ("wp_config_backup", "/wp-config.php.bak"),
     ]
     for index, path in enumerate(upload_probe_paths(base_url, parser)[:2], start=1):
         probe_specs.append((f"uploads_sample_{index}", path))
 
     probes = {
         name: fetch_passive_probe(base_url, probe_dns_context, path)
-        for name, path in probe_specs
+        for name, path in probe_specs[:ADVANCED_RECON_PROBE_LIMIT]
+    }
+    cors_probe = fetch_passive_probe(
+        base_url,
+        probe_dns_context,
+        "/",
+        method="OPTIONS",
+        extra_headers={
+            "Origin": "https://aelyx.invalid",
+            "Access-Control-Request-Method": "GET",
+        },
+        max_body_bytes=12_000,
+        excerpt_limit=300,
+    )
+    crawled_pages = crawl_same_origin(
+        base_url,
+        probe_dns_context,
+        parser,
+        probes,
+        page_limit=ADVANCED_RECON_PAGE_LIMIT,
+    )
+    javascript = inspect_public_javascript(
+        base_url,
+        probe_dns_context,
+        parser,
+        crawled_pages,
+        js_limit=ADVANCED_RECON_JS_LIMIT,
+    )
+    advanced = {
+        "toolbox": [
+            "dns_records",
+            "tls_certificate",
+            "http_headers",
+            "robots_txt",
+            "sitemap",
+            "same_origin_crawl",
+            "public_javascript_inspection",
+            "cors_options",
+            "public_artifact_probes",
+            "cms_fingerprint",
+        ],
+        "limits": {
+            "page_limit": ADVANCED_RECON_PAGE_LIMIT,
+            "js_limit": ADVANCED_RECON_JS_LIMIT,
+            "probe_limit": ADVANCED_RECON_PROBE_LIMIT,
+        },
+        "cors": summarize_cors_probe(cors_probe),
+        "crawl": crawled_pages,
+        "javascript": javascript,
+        "robots": summarize_robots_probe(probes.get("robots_txt")),
+        "sitemap": summarize_sitemap_probe(probes.get("sitemap_xml"), base_url),
+        "public_exposures": analyze_public_exposure_probes(probes),
     }
     visible_components = detect_visible_wp_components(base_url, parser)
     wordpress = summarize_wordpress_surface(
@@ -4047,6 +4322,7 @@ def passive_surface_checks(
         "hostname": hostname,
         "dns_records": dns_records,
         "probes": probes,
+        "advanced": advanced,
         "wordpress": wordpress,
         "external_assets_without_sri": external_assets_without_sri(base_url, parser)[:25],
     }
@@ -4056,28 +4332,27 @@ def fetch_passive_probe(
     base_url: str,
     dns_context: dict[str, Any],
     path_with_query: str,
+    method: str = "GET",
+    extra_headers: dict[str, str] | None = None,
+    max_body_bytes: int = 160_000,
+    excerpt_limit: int = 900,
 ) -> dict[str, Any]:
     probe_url = build_probe_url(base_url, path_with_query)
     try:
-        if (
-            dns_context
-            and dns_context.get("ips")
-            and dns_context.get("resolver") not in {"system", "literal"}
-        ):
-            context = fetch_site_via_resolved_ip(
-                probe_url,
-                dns_context,
-                time.perf_counter(),
-                connect_timeout=3.0,
-                read_timeout=4.0,
-                max_body_bytes=160_000,
-            )
-        else:
-            context = fetch_site(probe_url, dns_context)
+        context = fetch_probe_context(
+            probe_url,
+            dns_context,
+            method=method,
+            extra_headers=extra_headers,
+            connect_timeout=3.0,
+            read_timeout=5.0,
+            max_body_bytes=max_body_bytes,
+        )
     except Exception as exc:
         return {
             "url": probe_url,
             "path": path_with_query,
+            "method": normalize_http_method(method),
             "ok": False,
             "error": str(exc)[:240],
         }
@@ -4087,6 +4362,7 @@ def fetch_passive_probe(
     return {
         "url": probe_url,
         "path": path_with_query,
+        "method": context.get("method", normalize_http_method(method)),
         "ok": True,
         "status_code": context.get("status_code", 0),
         "reason_phrase": context.get("reason_phrase", ""),
@@ -4094,7 +4370,8 @@ def fetch_passive_probe(
         "location": headers.get("location", ""),
         "content_type": headers.get("content-type", ""),
         "server": headers.get("server", ""),
-        "body_excerpt": compact_text(body, 900),
+        "headers": probe_header_subset(headers),
+        "body_excerpt": compact_text(body, excerpt_limit),
         "body_bytes_read": context.get("body_bytes_read", 0),
         "elapsed_ms": context.get("elapsed_ms", 0),
         "transport": context.get("transport", ""),
@@ -4225,6 +4502,530 @@ def external_assets_without_sri(final_url: str, parser: PageParser) -> list[dict
         if parsed.hostname and parsed.hostname != base_host and not item.get("integrity"):
             assets.append({"type": "stylesheet", "host": parsed.hostname, "url": absolute})
     return assets
+
+
+def probe_header_subset(headers: dict[str, str]) -> dict[str, str]:
+    interesting = set(
+        [
+            "allow",
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+            "content-type",
+            "content-length",
+            "location",
+            "server",
+            "x-powered-by",
+            "x-robots-tag",
+        ]
+    )
+    return {name: headers[name] for name in interesting if name in headers}
+
+
+def crawl_same_origin(
+    base_url: str,
+    dns_context: dict[str, Any],
+    seed_parser: PageParser,
+    probes: dict[str, dict[str, Any]],
+    page_limit: int,
+) -> list[dict[str, Any]]:
+    queue: list[str] = []
+    queued: set[str] = set()
+    crawled: list[dict[str, Any]] = []
+
+    def enqueue(value: str) -> None:
+        path = same_origin_path(base_url, value)
+        if not path or path in queued or not likely_html_path(path):
+            return
+        queued.add(path)
+        queue.append(path)
+
+    for value in seed_parser.links:
+        enqueue(value)
+    for value in summarize_sitemap_probe(probes.get("sitemap_xml"), base_url).get("paths", []):
+        enqueue(str(value))
+    for value in summarize_robots_probe(probes.get("robots_txt")).get("interesting_paths", []):
+        enqueue(str(value))
+
+    while queue and len(crawled) < page_limit:
+        path = queue.pop(0)
+        probe = fetch_passive_probe(
+            base_url,
+            dns_context,
+            path,
+            max_body_bytes=220_000,
+            excerpt_limit=18_000,
+        )
+        page = {
+            "path": path,
+            "url": probe.get("url", build_probe_url(base_url, path)),
+            "status_code": probe.get("status_code", 0),
+            "content_type": probe.get("content_type", ""),
+            "final_url": probe.get("final_url", ""),
+            "title": "",
+            "forms_count": 0,
+            "password_inputs": 0,
+            "scripts_count": 0,
+            "links_count": 0,
+            "signals": [],
+        }
+        body = probe.get("body_excerpt", "")
+        content_type = str(probe.get("content_type", "")).lower()
+        if probe_status(probe) == 200 and ("html" in content_type or "<html" in body.lower()):
+            parser = PageParser()
+            parser.feed(body)
+            page.update(
+                {
+                    "title": parser.title,
+                    "forms_count": len(parser.forms),
+                    "password_inputs": sum(
+                        1 for item in parser.inputs if item.get("type") == "password"
+                    ),
+                    "scripts_count": len(parser.scripts),
+                    "links_count": len(parser.links),
+                    "scripts": [
+                        urljoin(probe.get("final_url") or base_url, value)
+                        for value in parser.scripts[:12]
+                    ],
+                    "signals": page_signals(parser, body),
+                }
+            )
+            for value in parser.links[:80]:
+                enqueue(urljoin(probe.get("final_url") or base_url, value))
+        crawled.append(page)
+
+    return crawled
+
+
+def page_signals(parser: PageParser, body: str) -> list[str]:
+    signals: list[str] = []
+    lower_body = body.lower()
+    if parser.forms:
+        signals.append(f"{len(parser.forms)} form(s)")
+    if any(item.get("type") == "password" for item in parser.inputs):
+        signals.append("password input")
+    if "admin" in lower_body:
+        signals.append("admin wording")
+    if "graphql" in lower_body:
+        signals.append("GraphQL wording")
+    if "swagger" in lower_body or "openapi" in lower_body:
+        signals.append("API documentation wording")
+    if "__gatsby" in lower_body:
+        signals.append("Gatsby build marker")
+    if "__next" in lower_body:
+        signals.append("Next.js build marker")
+    return signals[:8]
+
+
+def same_origin_path(base_url: str, value: str) -> str:
+    if not value or re.match(r"^(?:mailto|tel|javascript|data):", value, re.I):
+        return ""
+    parsed_base = urlparse(base_url)
+    parsed = urlparse(urljoin(base_url, value))
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    if parsed.hostname != parsed_base.hostname:
+        return ""
+    if effective_port(parsed) != effective_port(parsed_base):
+        return ""
+    return urlunparse(("", "", parsed.path or "/", "", parsed.query[:300], ""))
+
+
+def effective_port(parsed: Any) -> int:
+    if parsed.port:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+def likely_html_path(path_with_query: str) -> bool:
+    path = urlparse(path_with_query).path.lower()
+    blocked = (
+        ".7z",
+        ".avi",
+        ".bmp",
+        ".css",
+        ".csv",
+        ".doc",
+        ".docx",
+        ".eot",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".json",
+        ".map",
+        ".mp3",
+        ".mp4",
+        ".pdf",
+        ".png",
+        ".rar",
+        ".svg",
+        ".tar",
+        ".tgz",
+        ".ttf",
+        ".webm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xls",
+        ".xlsx",
+        ".xml",
+        ".zip",
+    )
+    return not path.endswith(blocked)
+
+
+def inspect_public_javascript(
+    base_url: str,
+    dns_context: dict[str, Any],
+    seed_parser: PageParser,
+    crawled_pages: list[dict[str, Any]],
+    js_limit: int,
+) -> list[dict[str, Any]]:
+    scripts: list[str] = []
+    seen: set[str] = set()
+
+    def add_script(value: str) -> None:
+        absolute = urljoin(base_url, value)
+        path = same_origin_path(base_url, absolute)
+        if not path or path in seen:
+            return
+        seen.add(path)
+        scripts.append(path)
+
+    for value in seed_parser.scripts:
+        add_script(value)
+    for page in crawled_pages:
+        for value in page.get("scripts", [])[:12]:
+            add_script(str(value))
+
+    inspected: list[dict[str, Any]] = []
+    for path in scripts[:js_limit]:
+        probe = fetch_passive_probe(
+            base_url,
+            dns_context,
+            path,
+            max_body_bytes=260_000,
+            excerpt_limit=140_000,
+        )
+        body = probe.get("body_excerpt", "")
+        inspected.append(
+            {
+                "path": path,
+                "url": probe.get("url", build_probe_url(base_url, path)),
+                "status_code": probe.get("status_code", 0),
+                "content_type": probe.get("content_type", ""),
+                "endpoints": extract_js_endpoints(base_url, body)[:25],
+                "secret_markers": extract_js_secret_markers(body)[:12],
+                "source_maps": extract_source_map_hints(body)[:8],
+                "bytes_read": probe.get("body_bytes_read", 0),
+            }
+        )
+    return inspected
+
+
+def extract_js_endpoints(base_url: str, body: str) -> list[str]:
+    endpoints: list[str] = []
+    seen: set[str] = set()
+    pattern = re.compile(
+        r"""["'`]((?:https?://|/)(?:[^"'`\\\s<>]){2,220})["'`]""",
+        re.I,
+    )
+    for match in pattern.finditer(body or ""):
+        value = match.group(1).strip()
+        if value.startswith("//"):
+            continue
+        if value.startswith("http"):
+            parsed = urlparse(value)
+            base = urlparse(base_url)
+            if parsed.hostname != base.hostname:
+                continue
+            path = urlunparse(("", "", parsed.path or "/", "", parsed.query[:220], ""))
+        else:
+            path = same_origin_path(base_url, value)
+        if not path or static_asset_path(path):
+            continue
+        if path not in seen:
+            seen.add(path)
+            endpoints.append(path)
+    return endpoints
+
+
+def static_asset_path(path_with_query: str) -> bool:
+    path = urlparse(path_with_query).path.lower()
+    return path.endswith(
+        (
+            ".css",
+            ".gif",
+            ".ico",
+            ".jpeg",
+            ".jpg",
+            ".js",
+            ".map",
+            ".png",
+            ".svg",
+            ".webp",
+            ".woff",
+            ".woff2",
+        )
+    )
+
+
+def extract_js_secret_markers(body: str) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    pattern = re.compile(
+        r"""(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|private[_-]?key|bearer)\b\s*[:=]\s*["'`]([^"'`\s]{10,180})["'`]"""
+    )
+    for match in pattern.finditer(body or ""):
+        name = match.group(1)
+        value = match.group(2)
+        lowered = value.lower()
+        if lowered in {"undefined", "anonymous", "changeme", "placeholder"}:
+            continue
+        key = f"{name}:{len(value)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        markers.append(
+            {
+                "name": name,
+                "value_length": len(value),
+                "confidence": "needs validation",
+            }
+        )
+    return markers
+
+
+def extract_source_map_hints(body: str) -> list[str]:
+    hints: list[str] = []
+    for value in re.findall(r"sourceMappingURL=([^\s*]+)", body or "", flags=re.I):
+        clean = value.strip().strip("\"'")
+        if clean and clean not in hints:
+            hints.append(clean[:180])
+    return hints
+
+
+def summarize_cors_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    headers = probe.get("headers", {}) if probe else {}
+    origin = str(headers.get("access-control-allow-origin", "")).strip()
+    credentials = str(headers.get("access-control-allow-credentials", "")).strip()
+    methods_value = str(
+        headers.get("access-control-allow-methods") or headers.get("allow") or ""
+    )
+    methods = [
+        item.strip().upper()
+        for item in re.split(r"[, ]+", methods_value)
+        if item.strip()
+    ]
+    dangerous_methods = [
+        method for method in methods if method in {"PUT", "PATCH", "DELETE"}
+    ]
+    reflected_test_origin = origin.lower() == "https://aelyx.invalid"
+    wildcard = origin == "*"
+    credentialed = credentials.lower() == "true"
+    return {
+        "status_code": probe.get("status_code", 0) if probe else 0,
+        "allow_origin": origin,
+        "allow_credentials": credentialed,
+        "methods": methods[:12],
+        "dangerous_methods": dangerous_methods,
+        "permissive_origin": wildcard or reflected_test_origin,
+        "credentialed_cross_origin": credentialed and (wildcard or reflected_test_origin),
+    }
+
+
+def summarize_robots_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
+    if not probe or probe_status(probe) != 200:
+        return {"present": False, "interesting_paths": [], "sitemaps": []}
+    body = probe.get("body_excerpt", "")
+    paths: list[str] = []
+    sitemaps: list[str] = []
+    for directive, value in re.findall(r"(?i)\b(disallow|allow|sitemap)\s*:\s*([^\s#]+)", body):
+        clean = value.strip()
+        if directive.lower() == "sitemap":
+            sitemaps.append(clean[:240])
+        elif interesting_robots_path(clean):
+            paths.append(clean[:220])
+    return {
+        "present": True,
+        "interesting_paths": dedupe_strings(paths, 12),
+        "sitemaps": dedupe_strings(sitemaps, 8),
+    }
+
+
+def interesting_robots_path(path: str) -> bool:
+    return bool(
+        re.search(
+            r"admin|backup|private|upload|config|api|login|wp-|debug|staging|dev|test",
+            path or "",
+            re.I,
+        )
+    )
+
+
+def summarize_sitemap_probe(
+    probe: dict[str, Any] | None,
+    base_url: str,
+) -> dict[str, Any]:
+    if not probe or probe_status(probe) != 200:
+        return {"present": False, "paths": []}
+    paths: list[str] = []
+    for loc in re.findall(r"(?is)<loc>\s*([^<]+)\s*</loc>", probe.get("body_excerpt", "")):
+        path = same_origin_path(base_url, loc.strip())
+        if path:
+            paths.append(path)
+    return {"present": True, "paths": dedupe_strings(paths, 20)}
+
+
+def dedupe_strings(values: list[str], limit: int) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = str(value or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        output.append(clean)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def analyze_public_exposure_probes(
+    probes: dict[str, dict[str, Any]]
+) -> list[dict[str, str]]:
+    exposures: list[dict[str, str]] = []
+
+    def add(
+        name: str,
+        severity: str,
+        title: str,
+        evidence: str,
+        recommendation: str,
+    ) -> None:
+        probe = probes.get(name, {})
+        exposures.append(
+            {
+                "name": name,
+                "severity": severity,
+                "title": title,
+                "path": str(probe.get("path", "")),
+                "status_code": str(probe.get("status_code", "")),
+                "evidence": evidence,
+                "recommendation": recommendation,
+            }
+        )
+
+    env_probe = probes.get("env_file", {})
+    env_body = env_probe.get("body_excerpt", "").lower()
+    if probe_status(env_probe) == 200 and re.search(r"\b(db_|database_|secret|api_|app_key|password)\w*\s*=", env_body):
+        add(
+            "env_file",
+            "critical",
+            "Environment file appears publicly readable",
+            "/.env returned HTTP 200 and contains configuration-key style markers. Secret values were not copied into the report.",
+            "Block dotfiles at the web server and rotate any exposed secrets immediately.",
+        )
+
+    git_probe = probes.get("git_config", {})
+    git_body = git_probe.get("body_excerpt", "").lower()
+    if probe_status(git_probe) == 200 and (
+        "[core]" in git_body or "repositoryformatversion" in git_body
+    ):
+        add(
+            "git_config",
+            "critical",
+            "Git repository metadata is public",
+            "/.git/config returned HTTP 200 with Git configuration markers.",
+            "Block .git at the edge, remove repository metadata from the web root, and review exposed history.",
+        )
+
+    phpinfo_probe = probes.get("phpinfo", {})
+    phpinfo_body = phpinfo_probe.get("body_excerpt", "").lower()
+    if probe_status(phpinfo_probe) == 200 and ("phpinfo()" in phpinfo_body or "php version" in phpinfo_body):
+        add(
+            "phpinfo",
+            "high",
+            "phpinfo page appears public",
+            "/phpinfo.php returned HTTP 200 with PHP environment markers.",
+            "Remove phpinfo from production and rotate any secrets that may have been exposed through environment output.",
+        )
+
+    for name, label in (
+        ("wp_config_backup", "WordPress configuration backup"),
+        ("database_sql", "Database dump"),
+        ("db_sql", "Database dump"),
+    ):
+        probe = probes.get(name, {})
+        body = probe.get("body_excerpt", "").lower()
+        if probe_status(probe) == 200 and re.search(r"db_name|db_password|create table|insert into|mysql", body):
+            add(
+                name,
+                "critical",
+                f"{label} appears public",
+                f"{probe.get('path', name)} returned HTTP 200 with database/configuration markers. Sensitive values were not copied.",
+                "Remove the file from the web root, block backup extensions, and rotate any exposed credentials.",
+            )
+
+    backup_probe = probes.get("backup_zip", {})
+    backup_type = str(backup_probe.get("content_type", "")).lower()
+    if probe_status(backup_probe) == 200 and re.search(r"zip|octet-stream|archive", backup_type):
+        add(
+            "backup_zip",
+            "high",
+            "Backup archive may be public",
+            "/backup.zip returned HTTP 200 with an archive-like content type.",
+            "Move backups outside the web root and require authenticated, audited storage access.",
+        )
+
+    for name, label in (
+        ("composer_lock", "Composer dependency lockfile"),
+        ("package_lock", "npm dependency lockfile"),
+        ("yarn_lock", "Yarn dependency lockfile"),
+    ):
+        probe = probes.get(name, {})
+        body = probe.get("body_excerpt", "").lower()
+        if probe_status(probe) == 200 and re.search(r'"packages"|resolved|integrity|content-hash', body):
+            add(
+                name,
+                "medium",
+                f"{label} is public",
+                f"{probe.get('path', name)} returned HTTP 200 with dependency metadata markers.",
+                "Avoid publishing build metadata unless intentionally public, and monitor dependencies for known CVEs.",
+            )
+
+    for name, label in (
+        ("openapi_json", "OpenAPI schema"),
+        ("swagger_json", "Swagger schema"),
+        ("swagger_ui", "Swagger UI"),
+    ):
+        probe = probes.get(name, {})
+        body = probe.get("body_excerpt", "").lower()
+        if probe_status(probe) == 200 and ("openapi" in body or "swagger" in body):
+            add(
+                name,
+                "medium",
+                f"{label} is public",
+                f"{probe.get('path', name)} returned HTTP 200 with API documentation markers.",
+                "Keep public API docs intentional, remove sensitive routes from schemas, and enforce auth on non-public operations.",
+            )
+
+    graphql_probe = probes.get("graphql", {})
+    graphql_body = graphql_probe.get("body_excerpt", "").lower()
+    if probe_status(graphql_probe) in {200, 400, 405} and "graphql" in graphql_body:
+        add(
+            "graphql",
+            "medium",
+            "GraphQL endpoint is publicly reachable",
+            f"/graphql returned HTTP {graphql_probe.get('status_code')} with GraphQL markers.",
+            "Disable introspection in production when not needed and enforce authorization on every resolver.",
+        )
+
+    return exposures
 
 
 def probe_status(probe: dict[str, Any] | None) -> int:
@@ -4521,6 +5322,99 @@ def classify_findings(
             "No DS records were returned by public DoH resolvers for the audited hostname.",
             "Enable DNSSEC at the registrar/DNS provider or document why it is not used.",
             "DNS hardening",
+        )
+
+    advanced = surface_context.get("advanced", {})
+    cors = advanced.get("cors", {})
+    if cors.get("credentialed_cross_origin"):
+        add(
+            "high",
+            "Credentialed cross-origin access appears permissive",
+            (
+                "OPTIONS response allowed a test cross-origin request with credentials: "
+                f"origin={cors.get('allow_origin')}, methods={sample(cors.get('methods', []))}."
+            ),
+            "Restrict CORS to exact trusted origins and avoid Access-Control-Allow-Credentials unless required.",
+            "Browser/API hardening",
+        )
+    elif cors.get("permissive_origin"):
+        add(
+            "medium",
+            "Permissive CORS origin policy",
+            (
+                "OPTIONS response allowed a broad or reflected origin: "
+                f"{cors.get('allow_origin') or 'not shown'}."
+            ),
+            "Return Access-Control-Allow-Origin only for approved origins and routes.",
+            "Browser/API hardening",
+        )
+
+    dangerous_methods = cors.get("dangerous_methods", [])
+    if dangerous_methods:
+        add(
+            "medium",
+            "Potentially unsafe HTTP methods advertised",
+            f"OPTIONS/Allow advertised method(s): {sample(dangerous_methods)}.",
+            "Disable PUT/PATCH/DELETE on public routes unless every route has strong authorization and CSRF protection.",
+            "Server configuration",
+        )
+
+    for exposure in advanced.get("public_exposures", []):
+        add(
+            exposure.get("severity", "medium"),
+            exposure.get("title", "Public exposure"),
+            exposure.get("evidence", "A public probe returned a sensitive-looking response."),
+            exposure.get("recommendation", "Remove the exposed artifact or protect it with authentication."),
+            "Public artifact exposure",
+        )
+
+    js_items = advanced.get("javascript", [])
+    js_secret_hits = [
+        item
+        for item in js_items
+        if item.get("secret_markers")
+    ]
+    if js_secret_hits:
+        paths = [item.get("path", "") for item in js_secret_hits if item.get("path")]
+        marker_names = sorted(
+            {
+                marker.get("name", "secret")
+                for item in js_secret_hits
+                for marker in item.get("secret_markers", [])
+            }
+        )
+        add(
+            "medium",
+            "Secret-like markers in public JavaScript",
+            (
+                f"Public JS contains token/key-looking assignments in {sample(paths)}. "
+                f"Marker names: {sample(marker_names)}. Values were not copied."
+            ),
+            "Move secrets server-side, rotate any real exposed credentials, and keep only public client IDs in browser code.",
+            "Client-side supply chain",
+        )
+
+    source_map_hits = [
+        item for item in js_items if item.get("source_maps")
+    ]
+    if source_map_hits:
+        paths = [item.get("path", "") for item in source_map_hits if item.get("path")]
+        add(
+            "low",
+            "Source map references visible in public JavaScript",
+            f"Source map hints were observed in: {sample(paths)}.",
+            "Publish source maps only when intentional, and verify they do not expose private source or comments.",
+            "Information exposure",
+        )
+
+    robots_paths = advanced.get("robots", {}).get("interesting_paths", [])
+    if robots_paths:
+        add(
+            "low",
+            "robots.txt reveals sensitive-looking paths",
+            f"robots.txt references: {sample(robots_paths)}.",
+            "Keep robots.txt minimal and enforce access control on sensitive routes instead of relying on crawler hints.",
+            "Information exposure",
         )
 
     if wordpress.get("detected"):
@@ -4893,6 +5787,11 @@ def public_header_subset(headers: dict[str, str]) -> dict[str, str]:
         "permissions-policy",
         "cache-control",
         "set-cookie",
+        "allow",
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-allow-methods",
+        "access-control-allow-headers",
     ]
     return {name: headers[name] for name in interesting if name in headers}
 
@@ -5035,11 +5934,13 @@ def call_aegis_direct_pentest(
     validation_mode: str = "safe",
     proof_authorized: bool = False,
     timeout_seconds: int | None = None,
+    evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prompt = build_aegis_direct_pentest_prompt(
         target_url,
         validation_mode,
         proof_authorized,
+        evidence_report,
     )
     result = call_local_bridge_prompt(
         target_url,
@@ -5052,11 +5953,175 @@ def call_aegis_direct_pentest(
     return result
 
 
+def call_direct_agent_strategy(
+    target_url: str,
+    validation_mode: str,
+    proof_authorized: bool,
+    is_sheepstealer: bool,
+) -> dict[str, Any]:
+    prompt = build_direct_agent_strategy_prompt(
+        target_url,
+        validation_mode,
+        proof_authorized,
+    )
+    if not is_sheepstealer:
+        result = call_local_bridge_prompt(
+            target_url,
+            prompt,
+            int(AGENT_STRATEGY_TIMEOUT_SECONDS),
+        )
+        result["analysis_mode"] = "agent_strategy"
+        result["validation_mode"] = validation_mode
+        result["proof_authorized"] = proof_authorized
+        if result.get("error"):
+            return default_agent_strategy(
+                target_url,
+                validation_mode,
+                proof_authorized,
+                "local strategy provider failed",
+                result.get("content", ""),
+            )
+        return result
+
+    token_choices = rotated_hf_tokens()
+    if not token_choices:
+        return default_agent_strategy(
+            target_url,
+            validation_mode,
+            proof_authorized,
+            "HF strategy credentials are not configured",
+        )
+
+    all_tokens = [token for _, token in token_choices]
+    errors: list[str] = []
+    deadline = time.monotonic() + AGENT_STRATEGY_TIMEOUT_SECONDS
+    max_attempts = min(HF_MAX_ATTEMPTS, AGENT_STRATEGY_MAX_ATTEMPTS)
+    for token_index, token in token_choices[:max_attempts]:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 1:
+            break
+        try:
+            content = create_hf_chat_completion(
+                token,
+                prompt,
+                max_tokens=1100,
+                timeout_seconds=min(
+                    AGENT_STRATEGY_TIMEOUT_SECONDS,
+                    max(8.0, remaining_seconds),
+                ),
+            )
+            return {
+                "skipped": False,
+                "model": PUBLIC_MODEL_LABEL,
+                "content": content,
+                "prompt_preview": prompt[:900],
+                "credential_count": len(token_choices),
+                "credential_index": token_index + 1,
+                "attempts": len(errors) + 1,
+                "analysis_mode": "agent_strategy",
+                "validation_mode": validation_mode,
+                "proof_authorized": proof_authorized,
+            }
+        except Exception as exc:
+            errors.append(redact_llm_error(exc, all_tokens))
+
+    reason = errors[-1] if errors else "strategy planning timed out"
+    return default_agent_strategy(
+        target_url,
+        validation_mode,
+        proof_authorized,
+        reason,
+    )
+
+
+def default_agent_strategy(
+    target_url: str,
+    validation_mode: str,
+    proof_authorized: bool,
+    reason: str,
+    provider_content: str = "",
+) -> dict[str, Any]:
+    content = (
+        "Strategy fallback: run maximum authorized evidence coverage for this origin. "
+        "Prioritize critical exposure first: public secrets, public backups, debug files, "
+        "admin/login exposure, unsafe CORS, dangerous HTTP methods, weak browser policy, "
+        "TLS/DNS gaps, CMS/API surfaces, public JavaScript endpoints, source maps, forms, "
+        "cookies, and third-party asset risk. Mark intrusive checks as needs-validation; "
+        "do not execute destructive actions, brute force, uploads, persistence, or private "
+        "data extraction."
+    )
+    if provider_content:
+        content = f"{content}\n\nProvider note: {llm_preview(provider_content, 300)}"
+    return {
+        "skipped": True,
+        "model": PUBLIC_MODEL_LABEL,
+        "credential_count": 0,
+        "attempts": 0,
+        "error": "strategy_fallback",
+        "analysis_mode": "agent_strategy",
+        "validation_mode": validation_mode,
+        "proof_authorized": proof_authorized,
+        "content": content,
+        "target_url": target_url,
+        "reason": reason,
+    }
+
+
+def build_direct_agent_strategy_prompt(
+    target_url: str,
+    validation_mode: str,
+    proof_authorized: bool,
+) -> str:
+    validation_rules = build_validation_mode_rules(validation_mode, proof_authorized)
+    return (
+        "You are the lead LLM pentest strategist inside Aelyx. Plan the highest-value "
+        "authorized assessment approach before tools run.\n\n"
+        f"Target scope: {target_url}\n"
+        f"Validation mode: {validation_mode}. Proof authorization: {proof_authorized}.\n"
+        f"{validation_rules}\n\n"
+        "Available authorized tool families:\n"
+        "- DNS records and network boundary checks.\n"
+        "- TLS certificate and HTTPS posture checks.\n"
+        "- HTTP redirects, headers, cookies, forms, browser policy, CORS and OPTIONS checks.\n"
+        "- robots.txt, sitemap.xml, security.txt, and same-origin crawl.\n"
+        "- Public JavaScript/static asset inspection for endpoints, source maps, and secret-like markers.\n"
+        "- Public artifact probes for common accidental exposures such as .env, .git/config, backups, logs, API docs, GraphQL, CMS endpoints.\n"
+        "- CMS fingerprinting for WordPress and visible plugin/theme/core signals.\n\n"
+        "You may recommend deeper intrusive validation only as a clearly separated manual request. "
+        "Do not ask the tool layer to brute force credentials, exploit RCE/SQLi/XSS, upload files, "
+        "change data, send messages, create accounts, persist access, degrade service, or extract private data.\n\n"
+        "Return a concise strategy with these exact sections:\n"
+        "1. Priority hypotheses.\n"
+        "2. Tool plan.\n"
+        "3. Evidence that would prove or disprove each high-risk path.\n"
+        "4. Intrusive checks that must remain manual/explicitly authorized.\n"
+        "5. Reporting focus for non-expert users."
+    )
+
+
+def build_strategy_step_detail(strategy: dict[str, Any]) -> str:
+    if strategy.get("error") == "strategy_fallback":
+        return (
+            "LLM strategy provider was unavailable, so Aelyx switched to a max-coverage "
+            "authorized tool plan and will still give the final LLM all evidence."
+        )
+    if strategy.get("error"):
+        return (
+            "LLM strategy returned with an error; the scan will continue with broad "
+            "authorized evidence collection."
+        )
+    preview = llm_preview(strategy.get("content", ""), 260)
+    if preview:
+        return f"LLM strategy ready: {preview}"
+    return "LLM strategy ready."
+
+
 def call_sheepstealer_direct_pentest(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
     timeout_seconds: int | None = None,
+    evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     token_choices = rotated_hf_tokens()
     if not token_choices:
@@ -5077,6 +6142,7 @@ def call_sheepstealer_direct_pentest(
         target_url,
         validation_mode,
         proof_authorized,
+        evidence_report,
     )
     all_tokens = [token for _, token in token_choices]
     errors: list[str] = []
@@ -5151,7 +6217,31 @@ def build_direct_report(
     proof_authorized: bool = False,
     technology: str = "Aelyx direct analysis",
     reason_phrase: str = "Aelyx Engine",
+    evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if evidence_report:
+        direct_report = {
+            **evidence_report,
+            "target": target_url,
+            "final_url": evidence_report.get("final_url", target_url),
+            "llm": llm_context,
+            "steps": steps,
+            "duration_ms": elapsed_ms,
+        }
+        direct_report.setdefault("surface", {})
+        direct_report["surface"].update(
+            {
+                "analysis_mode": analysis_mode,
+                "validation_mode": validation_mode,
+                "proof_authorized": proof_authorized,
+                "llm_provider": llm_context.get("model", ""),
+            }
+        )
+        technologies = set(direct_report.get("technologies") or [])
+        technologies.add(technology)
+        direct_report["technologies"] = sorted(technologies)
+        return direct_report
+
     return {
         "target": target_url,
         "final_url": target_url,
@@ -5201,13 +6291,15 @@ def build_aegis_direct_pentest_prompt(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
+    evidence_report: dict[str, Any] | None = None,
 ) -> str:
     return build_direct_pentest_prompt(
         target_url,
         "You are running as the Aelyx local analysis engine.",
-        "Use local command-line tools and safe scripts available in this environment to gather evidence.",
+        "Use the Aelyx toolbox evidence below as your primary facts, then reason carefully over gaps.",
         validation_mode,
         proof_authorized,
+        evidence_report,
     )
 
 
@@ -5215,13 +6307,15 @@ def build_sheepstealer_direct_pentest_prompt(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
+    evidence_report: dict[str, Any] | None = None,
 ) -> str:
     return build_direct_pentest_prompt(
         target_url,
         "You are sheepstealer running as the selected Aelyx analysis engine.",
-        "Do not use or assume any precomputed passive collector output; the backend only passed you the target.",
+        "Use the Aelyx toolbox evidence below as your primary facts, then reason carefully over gaps.",
         validation_mode,
         proof_authorized,
+        evidence_report,
     )
 
 
@@ -5267,15 +6361,28 @@ def build_direct_pentest_prompt(
     evidence_instruction: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
+    evidence_report: dict[str, Any] | None = None,
 ) -> str:
     validation_rules = build_validation_mode_rules(validation_mode, proof_authorized)
+    evidence_block = ""
+    if evidence_report:
+        compact_evidence = compact_direct_evidence(evidence_report)
+        evidence_block = (
+            "Aelyx LLM-guided tool evidence JSON:\n"
+            f"{json.dumps(compact_evidence, indent=2)}\n\n"
+            "Use this evidence as authoritative. The tool layer used bounded, non-destructive "
+            "DNS/TLS/HTTP/header/CORS/robots/sitemap/crawl/JavaScript/public-file checks. "
+            "Do not copy or invent secret values; if a secret-like artifact is detected, report "
+            "the exposure class and rotation/removal advice only.\n\n"
+        )
     return (
         f"{engine_intro} The user explicitly requested an "
         "authorized security assessment of this target, and the Aelyx UI authorization "
         "checkbox was required before this job was created.\n\n"
         f"Target scope: {target_url}\n\n"
-        "Do the assessment end-to-end yourself. Do not rely on any precomputed backend "
-        f"collector output; the backend only passed you the target. {evidence_instruction}\n\n"
+        "Do the assessment end-to-end as an agentic security analyst. "
+        f"{evidence_instruction}\n\n"
+        f"{evidence_block}"
         f"Validation mode: {validation_mode}. Proof authorization: {proof_authorized}.\n"
         f"{validation_rules}\n\n"
         "Rules of engagement:\n"
@@ -5313,6 +6420,112 @@ def build_direct_pentest_prompt(
         "- Include a prioritized remediation plan.\n"
         "- Do not hide findings just because they are numerous."
     )
+
+
+def compact_direct_evidence(report: dict[str, Any]) -> dict[str, Any]:
+    surface = report.get("surface", {})
+    advanced = surface.get("advanced", {})
+    probes = surface.get("probes", {})
+    crawl = advanced.get("crawl", [])
+    javascript = advanced.get("javascript", [])
+    return {
+        "target": report.get("target"),
+        "final_url": report.get("final_url"),
+        "score": report.get("score"),
+        "posture": report.get("posture"),
+        "severity_counts": report.get("severity_counts"),
+        "http": report.get("http"),
+        "tls": report.get("tls"),
+        "network": {
+            "hostname": report.get("network", {}).get("hostname"),
+            "ips": report.get("network", {}).get("ips", [])[:6],
+            "resolver": report.get("network", {}).get("resolver"),
+        },
+        "dns_records": report.get("dns_records", {}),
+        "page": report.get("page", {}),
+        "technologies": report.get("technologies", [])[:30],
+        "deterministic_findings": [
+            {
+                "severity": finding.get("severity"),
+                "title": finding.get("title"),
+                "category": finding.get("category"),
+                "evidence": finding.get("evidence"),
+                "fix": finding.get("recommendation"),
+            }
+            for finding in report.get("vulnerabilities", [])[:60]
+        ],
+        "toolbox": {
+            "llm_strategy": {
+                "status": "fallback" if surface.get("agent_strategy", {}).get("skipped") else "ready",
+                "content": surface.get("agent_strategy", {}).get("content", ""),
+            },
+            "tools_used": advanced.get("toolbox", []),
+            "limits": advanced.get("limits", {}),
+            "cors": advanced.get("cors", {}),
+            "robots": advanced.get("robots", {}),
+            "sitemap": advanced.get("sitemap", {}),
+            "public_exposures": advanced.get("public_exposures", []),
+            "crawl": [
+                {
+                    "path": page.get("path"),
+                    "status_code": page.get("status_code"),
+                    "title": page.get("title"),
+                    "forms_count": page.get("forms_count"),
+                    "password_inputs": page.get("password_inputs"),
+                    "scripts_count": page.get("scripts_count"),
+                    "signals": page.get("signals", []),
+                }
+                for page in crawl[:ADVANCED_RECON_PAGE_LIMIT]
+            ],
+            "javascript": [
+                {
+                    "path": item.get("path"),
+                    "status_code": item.get("status_code"),
+                    "endpoints": item.get("endpoints", [])[:15],
+                    "secret_markers": item.get("secret_markers", [])[:8],
+                    "source_maps": item.get("source_maps", [])[:5],
+                }
+                for item in javascript[:ADVANCED_RECON_JS_LIMIT]
+            ],
+            "notable_probes": notable_probe_summary(probes),
+        },
+        "hosting_recommendations": report.get("hosting_recommendations", [])[:12],
+    }
+
+
+def notable_probe_summary(probes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    notable: list[dict[str, Any]] = []
+    sensitive_names = {
+        "env_file",
+        "git_config",
+        "debug_log",
+        "backup_zip",
+        "database_sql",
+        "db_sql",
+        "wp_config_backup",
+        "phpinfo",
+    }
+    for name, probe in probes.items():
+        status = probe_status(probe)
+        if status in {0, 404}:
+            continue
+        item = {
+            "name": name,
+            "path": probe.get("path"),
+            "status_code": status,
+            "content_type": probe.get("content_type", ""),
+            "location": probe.get("location", ""),
+        }
+        if name not in sensitive_names:
+            excerpt = probe.get("body_excerpt", "")
+            if excerpt:
+                item["excerpt"] = compact_text(excerpt, 220)
+        else:
+            item["excerpt"] = "redacted-sensitive-probe"
+        notable.append(item)
+        if len(notable) >= 24:
+            break
+    return notable
 
 
 def create_hf_chat_completion(
