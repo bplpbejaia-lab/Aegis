@@ -118,7 +118,7 @@ const ADMIN_PERIOD_LABELS = {
   month: "Last 30 days",
   all: "All time",
 };
-const THINKING_MOOD_MS = 3400;
+const THINKING_MOOD_MS = 8200;
 const THINKING_MOODS = [
   {
     phase: "Scope gate",
@@ -191,6 +191,63 @@ const THINKING_MOODS = [
     explain: "The last pass makes the output useful for both technical and business readers.",
   },
 ];
+const DIRECT_STEP_IDS = new Set(["aegis_direct", "sheepstealer_direct"]);
+const SCAN_STEP_META = {
+  scope: {
+    label: "Scope",
+    runningTitle: "Checking scope",
+    completeTitle: "Scope accepted",
+    runningDetail: "Aelyx is confirming the URL, permission checkbox, selected engine, and quota before deeper work starts.",
+  },
+  dns: {
+    label: "DNS",
+    runningTitle: "Mapping DNS",
+    completeTitle: "DNS mapped",
+    runningDetail: "Resolving the hostname and checking that the target stays inside the allowed public boundary.",
+  },
+  http: {
+    label: "HTTP",
+    runningTitle: "Reading the site",
+    completeTitle: "HTTP captured",
+    runningDetail: "Fetching a bounded page sample, redirects, status code, and response headers.",
+  },
+  tls: {
+    label: "TLS",
+    runningTitle: "Checking HTTPS",
+    completeTitle: "TLS checked",
+    runningDetail: "Inspecting the certificate, negotiated protocol, and secure transport signals.",
+  },
+  surface: {
+    label: "Surface",
+    runningTitle: "Inspecting surface",
+    completeTitle: "Surface mapped",
+    runningDetail: "Checking DNS records, robots.txt, WordPress hints, public endpoints, and client asset integrity.",
+  },
+  headers: {
+    label: "Headers",
+    runningTitle: "Classifying evidence",
+    completeTitle: "Evidence classified",
+    runningDetail: "Grouping headers, cookies, forms, scripts, and passive signals into findings.",
+  },
+  llm: {
+    label: "Report",
+    runningTitle: "Writing report",
+    completeTitle: "Report drafted",
+    runningDetail: "Turning the collected evidence into a readable risk summary and fix plan.",
+  },
+  aegis_direct: {
+    label: "Aelyx",
+    runningTitle: "Aelyx engine working",
+    completeTitle: "Aelyx engine finished",
+    runningDetail: "The agent is collecting public evidence, checking safe paths, and preparing the report. This can take a few minutes.",
+  },
+  sheepstealer_direct: {
+    label: "sheepstealer",
+    runningTitle: "sheepstealer working",
+    completeTitle: "sheepstealer finished",
+    runningDetail: "The hosted engine is reviewing public evidence and writing the report. This can take a few minutes when the provider is busy.",
+  },
+};
 let runStartedAt = 0;
 let timer = null;
 let thinkingMoodTimer = null;
@@ -1748,6 +1805,7 @@ async function runAnalysis() {
   timer = window.setInterval(updateElapsed, 120);
   runButton.disabled = true;
   runButton.classList.add("is-running");
+  workBoard?.classList.add("is-running");
   if (stopButton) stopButton.hidden = false;
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
@@ -1804,6 +1862,7 @@ async function runAnalysis() {
   } finally {
     runButton.disabled = false;
     runButton.classList.remove("is-running");
+    workBoard?.classList.remove("is-running");
     if (stopButton) stopButton.hidden = true;
     currentRunController = null;
     runLabel.textContent = "Scan";
@@ -1838,6 +1897,7 @@ async function stopCurrentRun() {
 
 function markRunStopped() {
   hideThinkingModal();
+  workBoard?.classList.remove("is-running");
   agentState.textContent = "Stopped";
   agentDetail.textContent = "Analysis cancelled by user.";
   workStatus.textContent = "Stopped";
@@ -1863,8 +1923,7 @@ function handleEvent(message) {
   }
   if (type === "step") {
     renderStep(data);
-    agentState.textContent = data.status === "complete" ? "Thinking" : "Running";
-    agentDetail.textContent = data.detail;
+    setRunStateFromStep(data);
     updateProgress();
     updateThinkingFromStep(data);
     renderWorkStep(data);
@@ -1884,12 +1943,14 @@ function handleEvent(message) {
     workStatus.textContent = "Complete";
     workDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workProgressLabel.textContent = "100%";
+    workBoard?.classList.remove("is-running");
     hideThinkingModal();
     loadWorkspaceHistory();
     loadAccountQuota();
   }
   if (type === "error") {
     showError(data.message);
+    workBoard?.classList.remove("is-running");
     loadWorkspaceHistory();
   }
   if (type === "cancelled") {
@@ -1945,6 +2006,41 @@ function resetRun(target) {
   scrollChatToBottom();
 }
 
+function scanStepMeta(step) {
+  return SCAN_STEP_META[step?.id] || {};
+}
+
+function scanStepTitle(step) {
+  const meta = scanStepMeta(step);
+  if (step?.status === "complete") return meta.completeTitle || step.title || "Step complete";
+  return meta.runningTitle || step?.title || "Working";
+}
+
+function scanStepDetail(step) {
+  const meta = scanStepMeta(step);
+  return step?.detail || meta.runningDetail || "Aelyx is working through this scan phase.";
+}
+
+function scanStepStateLabel(step) {
+  const meta = scanStepMeta(step);
+  if (step?.status === "complete") {
+    if (step.result?.error === "direct_engine_timeout") return "Timed out";
+    if (step.result?.skipped) return "Returned";
+    return "Done";
+  }
+  if (step?.result?.elapsed_ms) return `${formatDuration(step.result.elapsed_ms)} active`;
+  return meta.label || "Running";
+}
+
+function setRunStateFromStep(step) {
+  const title = scanStepTitle(step);
+  const detail = scanStepDetail(step);
+  agentState.textContent = title;
+  agentDetail.textContent = detail;
+  workStatus.textContent = title;
+  workDetail.textContent = detail;
+}
+
 function renderStep(step) {
   let item = traceItems.get(step.id);
   if (!item) {
@@ -1954,7 +2050,10 @@ function renderStep(step) {
       <span class="message-avatar" aria-hidden="true">A</span>
       <div class="message-body">
         <p class="thinking-label">Using <span class="tool-name"></span></p>
-        <p class="step-title"></p>
+        <div class="step-topline">
+          <p class="step-title"></p>
+          <span class="step-state"></span>
+        </div>
         <p class="trace-detail"></p>
         <p class="step-preview" hidden></p>
       </div>
@@ -1965,8 +2064,11 @@ function renderStep(step) {
   item.classList.toggle("complete", step.status === "complete");
   item.classList.toggle("running", step.status !== "complete");
   item.classList.remove("error");
+  item.dataset.elapsedMs = step.result?.elapsed_ms || "";
+  item.dataset.timeoutSeconds = step.result?.timeout_seconds || "";
   item.querySelector(".step-title").textContent = step.title;
   item.querySelector(".tool-name").textContent = step.tool;
+  item.querySelector(".step-state").textContent = scanStepStateLabel(step);
   item.querySelector(".trace-detail").textContent = step.detail;
   const preview = item.querySelector(".step-preview");
   const previewText = step.result?.preview || "";
@@ -1976,10 +2078,19 @@ function renderStep(step) {
 }
 
 function resetWorkBoard() {
-  workStatus.textContent = "Running";
-  workDetail.textContent = "Preparing tools.";
+  workStatus.textContent = "Preparing scan";
+  workDetail.textContent = "Checking the selected target, engine, and authorization before work begins.";
   workProgressLabel.textContent = "0%";
-  workSteps.innerHTML = "";
+  workSteps.innerHTML = `
+    <li class="waiting">
+      <span class="work-step-marker" aria-hidden="true"></span>
+      <span class="work-step-copy">
+        <span class="work-step-title">Queued locally</span>
+        <small>Waiting for the first server event.</small>
+      </span>
+      <strong>Ready</strong>
+    </li>
+  `;
 }
 
 function renderWorkStep(step) {
@@ -1993,12 +2104,20 @@ function renderWorkStep(step) {
   }
   item.classList.toggle("complete", step.status === "complete");
   item.classList.toggle("running", step.status !== "complete");
+  item.classList.remove("waiting");
+  const title = scanStepTitle(step);
+  const detail = scanStepDetail(step);
+  const state = scanStepStateLabel(step);
   item.innerHTML = `
-    <span>${escapeHtml(step.title)}</span>
-    <strong>${escapeHtml(step.status === "complete" ? "Done" : "Running")}</strong>
+    <span class="work-step-marker" aria-hidden="true"></span>
+    <span class="work-step-copy">
+      <span class="work-step-title">${escapeHtml(title)}</span>
+      <small>${escapeHtml(detail)}</small>
+    </span>
+    <strong>${escapeHtml(state)}</strong>
   `;
-  workStatus.textContent = step.status === "complete" ? "Working" : "Running";
-  workDetail.textContent = step.detail;
+  workStatus.textContent = title;
+  workDetail.textContent = detail;
 }
 
 function showThinkingModal(target, engine) {
@@ -2008,8 +2127,8 @@ function showThinkingModal(target, engine) {
   thinkingTarget.textContent = target || "-";
   thinkingEngine.textContent = engine === "sheepstealer" ? "sheepstealer" : "Aelyx";
   thinkingQuota.textContent = "checking";
-  thinkingTitle.textContent = "Aelyx running";
-  thinkingDetail.textContent = "Preparing.";
+  thinkingTitle.textContent = "Preparing scan";
+  thinkingDetail.textContent = "Checking authorization, engine, quota, and target shape.";
   thinkingProgressBar?.style.setProperty("--thinking-progress", "8%");
   setThinkingStage(0);
   thinkingHasServerStep = false;
@@ -2025,10 +2144,10 @@ function hideThinkingModal() {
 function updateThinkingFromStep(step) {
   if (!thinkingModal || thinkingModal.hidden) return;
   thinkingHasServerStep = true;
-  thinkingTitle.textContent = step.status === "complete" ? "Evidence captured" : step.title;
-  thinkingDetail.textContent = step.detail || "Working.";
+  thinkingTitle.textContent = scanStepTitle(step);
+  thinkingDetail.textContent = scanStepDetail(step);
   applyThinkingMood(moodForStep(step.id));
-  const stageIndex = stageIndexForStep(step.id);
+  const stageIndex = stageIndexForStep(step.id, step.status);
   setThinkingStage(stageIndex);
   const progress = Number(String(workProgressLabel.textContent || "0").replace("%", "")) || 0;
   thinkingProgressBar?.style.setProperty("--thinking-progress", `${Math.max(8, progress)}%`);
@@ -2075,6 +2194,7 @@ function moodForStep(stepId) {
     surface: 4,
     aegis_direct: 6,
     sheepstealer_direct: 6,
+    headers: 5,
     local_report: 8,
     llm: 9,
   };
@@ -2098,12 +2218,14 @@ function setThinkingStage(activeIndex) {
   });
 }
 
-function stageIndexForStep(stepId) {
+function stageIndexForStep(stepId, status = "running") {
   if (["scope"].includes(stepId)) return 0;
-  if (["dns", "http", "tls", "surface", "aegis_direct", "sheepstealer_direct"].includes(stepId)) {
+  if (DIRECT_STEP_IDS.has(stepId)) return status === "complete" ? 4 : 2;
+  if (["dns", "http", "tls", "surface"].includes(stepId)) {
     return 1;
   }
-  if (["local_report", "llm"].includes(stepId)) return 3;
+  if (["headers", "local_report"].includes(stepId)) return 2;
+  if (["llm"].includes(stepId)) return status === "complete" ? 4 : 3;
   return 2;
 }
 
@@ -3054,7 +3176,16 @@ function updateProgress() {
   const completed = Array.from(traceItems.values()).filter((item) =>
     item.classList.contains("complete"),
   ).length;
-  const runningBonus = traceItems.size > completed ? 0.45 : 0;
+  const activeStep = Array.from(traceItems.values()).find((item) =>
+    item.classList.contains("running"),
+  );
+  let runningBonus = traceItems.size > completed ? 0.45 : 0;
+  if (activeStep?.dataset.elapsedMs && activeStep.dataset.timeoutSeconds) {
+    const elapsedMs = Number(activeStep.dataset.elapsedMs) || 0;
+    const timeoutMs = (Number(activeStep.dataset.timeoutSeconds) || 1) * 1000;
+    const timeoutProgress = Math.min(0.9, Math.max(0.35, elapsedMs / timeoutMs));
+    runningBonus = timeoutProgress;
+  }
   const progress = Math.min(100, Math.round(((completed + runningBonus) / totalSteps) * 100));
   progressBar.style.setProperty("--progress", `${progress}%`);
   workProgressLabel.textContent = `${progress}%`;

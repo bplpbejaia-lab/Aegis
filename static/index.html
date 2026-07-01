@@ -160,7 +160,14 @@
           <p id="work-detail">Free scan. Saved history after sign-in.</p>
           <button class="work-cta" type="button" data-focus-target>URL</button>
           <ol id="work-steps" class="work-steps" aria-label="Work steps">
-            <li>Waiting for a URL</li>
+            <li class="waiting">
+              <span class="work-step-marker" aria-hidden="true"></span>
+              <span class="work-step-copy">
+                <span class="work-step-title">Waiting for a URL</span>
+                <small>Enter an authorized target to start the scan timeline.</small>
+              </span>
+              <strong>Ready</strong>
+            </li>
           </ol>
         </section>
 
@@ -595,6 +602,6 @@
     </div>
 
     <script src="https://accounts.google.com/gsi/client?hl=en" async defer></script>
-    <script src="/static/app.js?v=scan-motion-1"></script>
+    <script src="/static/app.js?v=scan-motion-2"></script>
   </body>
 </html>

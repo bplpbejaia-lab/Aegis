@@ -79,6 +79,21 @@ LOCAL_BRIDGE_DIR = os.getenv(
     os.path.join(APP_DIR, ".aegis-local-llm"),
 )
 LOCAL_BRIDGE_TIMEOUT_SECONDS = int(os.getenv("AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS", "1800"))
+DIRECT_ENGINE_TIMEOUT_SECONDS = max(
+    30, int(os.getenv("AEGIS_DIRECT_ENGINE_TIMEOUT_SECONDS", "180"))
+)
+DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS = max(
+    4.0, float(os.getenv("AEGIS_DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS", "8"))
+)
+HF_CHAT_COMPLETION_TIMEOUT_SECONDS = max(
+    10.0, float(os.getenv("AEGIS_HF_CHAT_TIMEOUT_SECONDS", "45"))
+)
+HF_SOCKET_CONNECT_TIMEOUT_SECONDS = max(
+    2.0, float(os.getenv("AEGIS_HF_CONNECT_TIMEOUT_SECONDS", "6"))
+)
+HF_SOCKET_READ_TIMEOUT_SECONDS = max(
+    5.0, float(os.getenv("AEGIS_HF_READ_TIMEOUT_SECONDS", "35"))
+)
 DOH_ENDPOINTS = [
     ("https://8.8.8.8/resolve", {}),
     ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
@@ -2902,6 +2917,7 @@ async def run_analysis(
             yield event("step", step)
             direct_started_at = time.perf_counter()
             last_direct_update = 0.0
+            direct_update_index = 0
             llm_task = asyncio.create_task(
                 asyncio.to_thread(
                     call_sheepstealer_direct_pentest
@@ -2910,34 +2926,72 @@ async def run_analysis(
                     target_url,
                     validation_mode,
                     payload.proof_authorized,
+                    DIRECT_ENGINE_TIMEOUT_SECONDS,
                 )
             )
+            llm_context: dict[str, Any] | None = None
             while not llm_task.done():
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 cancelled_event = await cancellation_event_if_needed()
                 if cancelled_event:
                     llm_task.cancel()
+                    try:
+                        await llm_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
                     yield cancelled_event
                     return
                 if llm_task.done():
                     break
-                if time.perf_counter() - last_direct_update < 15:
+                elapsed_ms = int((time.perf_counter() - direct_started_at) * 1000)
+                if elapsed_ms >= DIRECT_ENGINE_TIMEOUT_SECONDS * 1000:
+                    llm_task.cancel()
+                    try:
+                        await llm_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+                    llm_context = direct_timeout_context(
+                        engine_title,
+                        target_url,
+                        validation_mode,
+                        payload.proof_authorized,
+                        elapsed_ms,
+                        PUBLIC_MODEL_LABEL
+                        if is_sheepstealer
+                        else "Aelyx local engine",
+                        step_id,
+                    )
+                    break
+                if (
+                    time.perf_counter() - last_direct_update
+                    < DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS
+                ):
                     continue
                 last_direct_update = time.perf_counter()
-                elapsed_label = human_duration(
-                    int((time.perf_counter() - direct_started_at) * 1000)
-                )
                 step.update(
                     {
-                        "detail": (
-                            f"{engine_title} is still running. "
-                            f"Elapsed: {elapsed_label}. Waiting for agent output."
+                        "detail": direct_progress_detail(
+                            engine_title,
+                            elapsed_ms,
+                            direct_update_index,
+                            DIRECT_ENGINE_TIMEOUT_SECONDS,
                         ),
+                        "result": {
+                            "elapsed_ms": elapsed_ms,
+                            "timeout_seconds": DIRECT_ENGINE_TIMEOUT_SECONDS,
+                            "phase": direct_update_index + 1,
+                        },
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+                direct_update_index += 1
                 yield event("step", step)
-            llm_context = await llm_task
+            if llm_context is None:
+                llm_context = await llm_task
             cancelled_event = await cancellation_event_if_needed()
             if cancelled_event:
                 yield cancelled_event
@@ -2952,6 +3006,9 @@ async def run_analysis(
                             PUBLIC_MODEL_LABEL if is_sheepstealer else "Aelyx local engine",
                         ),
                         "skipped": llm_context.get("skipped", False),
+                        "error": llm_context.get("error", ""),
+                        "elapsed_ms": llm_context.get("elapsed_ms", 0),
+                        "timeout_seconds": llm_context.get("timeout_seconds", 0),
                         "preview": llm_preview(llm_context.get("content", "")),
                     },
                 }
@@ -3258,6 +3315,60 @@ def human_duration(duration_ms: int) -> str:
     if minutes:
         return f"{minutes} min {remaining_seconds:02d} sec"
     return f"{remaining_seconds} sec"
+
+
+DIRECT_PROGRESS_MESSAGES = (
+    "Collecting public evidence and checking redirects.",
+    "Inspecting visible pages, headers, scripts, and safe endpoints.",
+    "Comparing signals against common security weaknesses.",
+    "Preparing the findings and remediation notes.",
+)
+
+
+def direct_progress_detail(
+    engine_title: str,
+    elapsed_ms: int,
+    update_index: int,
+    timeout_seconds: int,
+) -> str:
+    message = DIRECT_PROGRESS_MESSAGES[update_index % len(DIRECT_PROGRESS_MESSAGES)]
+    timeout_label = human_duration(timeout_seconds * 1000)
+    elapsed_label = human_duration(elapsed_ms)
+    return (
+        f"{message} {engine_title} is still active. "
+        f"Elapsed: {elapsed_label}. Safety limit: {timeout_label}."
+    )
+
+
+def direct_timeout_context(
+    engine_title: str,
+    target_url: str,
+    validation_mode: str,
+    proof_authorized: bool,
+    elapsed_ms: int,
+    model_label: str,
+    analysis_mode: str,
+) -> dict[str, Any]:
+    elapsed_label = human_duration(elapsed_ms)
+    return {
+        "skipped": True,
+        "model": model_label,
+        "credential_count": 0,
+        "attempts": 0,
+        "error": "direct_engine_timeout",
+        "analysis_mode": analysis_mode,
+        "validation_mode": validation_mode,
+        "proof_authorized": proof_authorized,
+        "content": (
+            f"{engine_title} did not finish within the {elapsed_label} safety window. "
+            "Aelyx closed the run instead of leaving it stuck. No AI-generated findings "
+            "were confirmed before the timeout; retry when the provider is responsive or "
+            "lower the requested validation depth."
+        ),
+        "target_url": target_url,
+        "elapsed_ms": elapsed_ms,
+        "timeout_seconds": DIRECT_ENGINE_TIMEOUT_SECONDS,
+    }
 
 
 def normalize_analysis_engine(raw_engine: str) -> str:
@@ -4723,7 +4834,9 @@ def call_local_bridge(target_url: str, report: dict[str, Any]) -> dict[str, Any]
     return call_local_bridge_prompt(target_url, prompt)
 
 
-def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
+def call_local_bridge_prompt(
+    target_url: str, prompt: str, timeout_seconds: int | None = None
+) -> dict[str, Any]:
     job_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex}"
     pending_dir = os.path.join(LOCAL_BRIDGE_DIR, "pending")
     done_dir = os.path.join(LOCAL_BRIDGE_DIR, "done")
@@ -4745,7 +4858,8 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
         json.dump(job, handle, ensure_ascii=False, indent=2)
     os.replace(pending_tmp_path, pending_path)
 
-    deadline = time.monotonic() + LOCAL_BRIDGE_TIMEOUT_SECONDS
+    effective_timeout = max(1, int(timeout_seconds or LOCAL_BRIDGE_TIMEOUT_SECONDS))
+    deadline = time.monotonic() + effective_timeout
     while time.monotonic() < deadline:
         if os.path.exists(done_path):
             with open(done_path, "r", encoding="utf-8") as handle:
@@ -4785,8 +4899,8 @@ def call_local_bridge_prompt(target_url: str, prompt: str) -> dict[str, Any]:
         "model": "Aelyx local engine",
         "content": (
             "Aelyx local engine timed out while waiting for the worker. The "
-            "report shell is still available. Start "
-            "local_llm_worker.py and retry, or increase AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS."
+            "report shell is still available. Start local_llm_worker.py and retry, "
+            f"or increase the worker timeout. Limit used: {human_duration(effective_timeout * 1000)}."
         ),
         "prompt_preview": prompt[:900],
         "credential_count": 1,
@@ -4800,13 +4914,18 @@ def call_aegis_direct_pentest(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     prompt = build_aegis_direct_pentest_prompt(
         target_url,
         validation_mode,
         proof_authorized,
     )
-    result = call_local_bridge_prompt(target_url, prompt)
+    result = call_local_bridge_prompt(
+        target_url,
+        prompt,
+        timeout_seconds or DIRECT_ENGINE_TIMEOUT_SECONDS,
+    )
     result["analysis_mode"] = "aegis_direct"
     result["validation_mode"] = validation_mode
     result["proof_authorized"] = proof_authorized
@@ -4817,6 +4936,7 @@ def call_sheepstealer_direct_pentest(
     target_url: str,
     validation_mode: str = "safe",
     proof_authorized: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     token_choices = rotated_hf_tokens()
     if not token_choices:
@@ -4840,9 +4960,22 @@ def call_sheepstealer_direct_pentest(
     )
     all_tokens = [token for _, token in token_choices]
     errors: list[str] = []
+    effective_timeout = max(10, int(timeout_seconds or DIRECT_ENGINE_TIMEOUT_SECONDS))
+    deadline = time.monotonic() + effective_timeout
     for token_index, token in token_choices[:HF_MAX_ATTEMPTS]:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 1:
+            break
         try:
-            content = create_hf_chat_completion(token, prompt, max_tokens=3500)
+            content = create_hf_chat_completion(
+                token,
+                prompt,
+                max_tokens=3500,
+                timeout_seconds=min(
+                    HF_CHAT_COMPLETION_TIMEOUT_SECONDS,
+                    max(6.0, remaining_seconds),
+                ),
+            )
             return {
                 "skipped": False,
                 "model": PUBLIC_MODEL_LABEL,
@@ -4857,6 +4990,17 @@ def call_sheepstealer_direct_pentest(
             }
         except Exception as exc:
             errors.append(redact_llm_error(exc, all_tokens))
+
+    if time.monotonic() >= deadline:
+        return direct_timeout_context(
+            "sheepstealer direct assessment",
+            target_url,
+            validation_mode,
+            proof_authorized,
+            effective_timeout * 1000,
+            PUBLIC_MODEL_LABEL,
+            "sheepstealer_direct",
+        )
 
     last_error = errors[-1] if errors else "Unknown inference error."
     return {
@@ -5047,20 +5191,37 @@ def build_direct_pentest_prompt(
     )
 
 
-def create_hf_chat_completion(token: str, prompt: str, max_tokens: int = 1200) -> str:
+def create_hf_chat_completion(
+    token: str,
+    prompt: str,
+    max_tokens: int = 1200,
+    timeout_seconds: float | None = None,
+) -> str:
     payload = {
         "model": HF_MODEL_ID,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.2,
     }
+    attempt_timeout = max(
+        2.0, float(timeout_seconds or HF_CHAT_COMPLETION_TIMEOUT_SECONDS)
+    )
     try:
-        response = post_hf_router_json(token, "/v1/chat/completions", payload)
+        response = post_hf_router_json(
+            token,
+            "/v1/chat/completions",
+            payload,
+            timeout_seconds=attempt_timeout,
+        )
         message = response["choices"][0]["message"]
         return message.get("content") or json.dumps(message)
     except Exception as fallback_exc:
         try:
-            client = OpenAI(base_url=HF_BASE_URL, api_key=token, timeout=8.0)
+            client = OpenAI(
+                base_url=HF_BASE_URL,
+                api_key=token,
+                timeout=max(2.0, min(8.0, attempt_timeout)),
+            )
             completion = client.chat.completions.create(**payload)
             message = completion.choices[0].message
             return message.content or str(message)
@@ -5071,7 +5232,12 @@ def create_hf_chat_completion(token: str, prompt: str, max_tokens: int = 1200) -
             ) from original_exc
 
 
-def post_hf_router_json(token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+def post_hf_router_json(
+    token: str,
+    path: str,
+    payload: dict[str, Any],
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request_head = (
         f"POST {path} HTTP/1.1\r\n"
@@ -5087,14 +5253,34 @@ def post_hf_router_json(token: str, path: str, payload: dict[str, Any]) -> dict[
 
     raw = b""
     last_error: Exception | None = None
+    deadline = time.monotonic() + max(
+        2.0, float(timeout_seconds or HF_CHAT_COMPLETION_TIMEOUT_SECONDS)
+    )
     for ip in resolve_with_cloudflare_doh(HF_ROUTER_HOST):
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
         try:
-            with socket.create_connection((ip, 443), timeout=10.0) as sock:
+            with socket.create_connection(
+                (ip, 443),
+                timeout=max(
+                    1.0,
+                    min(HF_SOCKET_CONNECT_TIMEOUT_SECONDS, remaining_seconds),
+                ),
+            ) as sock:
                 context = ssl.create_default_context()
                 with context.wrap_socket(sock, server_hostname=HF_ROUTER_HOST) as tls_sock:
-                    tls_sock.settimeout(90.0)
                     tls_sock.sendall(request_head + body)
                     while True:
+                        remaining_seconds = deadline - time.monotonic()
+                        if remaining_seconds <= 0:
+                            raise TimeoutError("inference gateway response timed out")
+                        tls_sock.settimeout(
+                            max(
+                                1.0,
+                                min(HF_SOCKET_READ_TIMEOUT_SECONDS, remaining_seconds),
+                            )
+                        )
                         chunk = tls_sock.recv(16384)
                         if not chunk:
                             break
@@ -5178,6 +5364,15 @@ def redact_llm_error(exc: Exception, secrets: list[str]) -> str:
 
 def build_llm_step_detail(llm_context: dict[str, Any]) -> str:
     credential_count = int(llm_context.get("credential_count") or 0)
+    if llm_context.get("error") == "direct_engine_timeout":
+        timeout_seconds = int(
+            llm_context.get("timeout_seconds") or DIRECT_ENGINE_TIMEOUT_SECONDS
+        )
+        return (
+            "The engine reached the "
+            f"{human_duration(timeout_seconds * 1000)} safety limit, so Aelyx closed "
+            "the scan and returned a timeout report instead of leaving it running."
+        )
     if llm_context.get("error"):
         return (
             f"Agent synthesis failed after {credential_count} configured credential(s); "
