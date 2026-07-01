@@ -70,7 +70,7 @@ ANALYSIS_MODE = os.getenv("AEGIS_ANALYSIS_MODE", "passive").strip().lower()
 HF_MODEL_ID = os.getenv("HF_MODEL_ID", "moonshotai/Kimi-K2-Instruct-0905:novita")
 HF_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_HOST = "router.huggingface.co"
-HF_MAX_ATTEMPTS = 3
+HF_MAX_ATTEMPTS = max(1, int(os.getenv("AEGIS_HF_MAX_ATTEMPTS", "6")))
 HF_TOKEN_LOCK = threading.Lock()
 HF_TOKEN_CURSOR = 0
 LLM_PROVIDER = os.getenv("AEGIS_LLM_PROVIDER", "hf").strip().lower()
@@ -86,13 +86,13 @@ DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS = max(
     4.0, float(os.getenv("AEGIS_DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS", "8"))
 )
 HF_CHAT_COMPLETION_TIMEOUT_SECONDS = max(
-    10.0, float(os.getenv("AEGIS_HF_CHAT_TIMEOUT_SECONDS", "45"))
+    30.0, float(os.getenv("AEGIS_HF_CHAT_TIMEOUT_SECONDS", "240"))
 )
 HF_SOCKET_CONNECT_TIMEOUT_SECONDS = max(
     2.0, float(os.getenv("AEGIS_HF_CONNECT_TIMEOUT_SECONDS", "6"))
 )
 HF_SOCKET_READ_TIMEOUT_SECONDS = max(
-    5.0, float(os.getenv("AEGIS_HF_READ_TIMEOUT_SECONDS", "35"))
+    30.0, float(os.getenv("AEGIS_HF_READ_TIMEOUT_SECONDS", "240"))
 )
 DOH_ENDPOINTS = [
     ("https://8.8.8.8/resolve", {}),
@@ -2367,7 +2367,13 @@ def admin_dashboard_payload() -> dict[str, Any]:
 
 app = FastAPI(title="Aelyx Autonomous Hosting & Security Analyst")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-init_db()
+if os.getenv("AEGIS_SKIP_DB_INIT", "").strip().lower() not in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    init_db()
 
 
 @app.middleware("http")
@@ -3015,6 +3021,89 @@ async def run_analysis(
             )
             yield event("step", step)
 
+            if direct_engine_needs_passive_fallback(llm_context):
+                fallback_step = record_step(
+                    "passive_fallback",
+                    "Deterministic fallback scan",
+                    "passive_scanner",
+                    "running",
+                    "The AI provider did not return a full report, so Aelyx is collecting DNS, HTTP, TLS, headers, and surface evidence locally.",
+                )
+                yield event("step", fallback_step)
+                fallback_report = await asyncio.to_thread(
+                    collect_passive_report,
+                    target_url,
+                )
+                cancelled_event = await cancellation_event_if_needed()
+                if cancelled_event:
+                    yield cancelled_event
+                    return
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                fallback_report["llm"] = llm_context
+                fallback_report["steps"] = steps
+                fallback_report["duration_ms"] = elapsed_ms
+                fallback_report.setdefault("surface", {})
+                fallback_report["surface"].update(
+                    {
+                        "analysis_mode": "deterministic_fallback",
+                        "requested_analysis_mode": step_id,
+                        "validation_mode": validation_mode,
+                        "proof_authorized": payload.proof_authorized,
+                        "provider_error": str(llm_context.get("error") or ""),
+                    }
+                )
+                fallback_step.update(
+                    {
+                        "status": "complete",
+                        "detail": (
+                            "Fallback scan complete: "
+                            f"classified {len(fallback_report.get('vulnerabilities', []))} passive finding(s)."
+                        ),
+                        "result": {
+                            "score": fallback_report.get("score", 0),
+                            "severity_counts": fallback_report.get("severity_counts", {}),
+                        },
+                    }
+                )
+                yield event("step", fallback_step)
+                finish_analysis_run(run_id, "completed", elapsed_ms, fallback_report)
+                log_activity(
+                    "analysis",
+                    "completed",
+                    actor_id,
+                    request,
+                    {
+                        "run_id": run_id,
+                        "target": target_url,
+                        "engine": selected_engine,
+                        "duration_ms": elapsed_ms,
+                        "score": fallback_report.get("score", 0),
+                        "fallback": "deterministic",
+                    },
+                )
+                safe_log_funnel_event(
+                    request,
+                    "analysis_completed",
+                    FunnelEventRequest(
+                        event_name="analysis_completed",
+                        path=request.url.path,
+                        target=target_url,
+                        engine=selected_engine,
+                        validation_mode=validation_mode,
+                    ),
+                    auth_context,
+                    {
+                        "run_id": run_id,
+                        "duration_ms": elapsed_ms,
+                        "score": fallback_report.get("score", 0),
+                        "fallback": "deterministic",
+                    },
+                )
+                yield event("metrics", fallback_report["summary"])
+                yield event("report", fallback_report)
+                yield event("done", {"duration_ms": elapsed_ms})
+                return
+
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             direct_report = build_direct_report(
                 target_url,
@@ -3315,6 +3404,37 @@ def human_duration(duration_ms: int) -> str:
     if minutes:
         return f"{minutes} min {remaining_seconds:02d} sec"
     return f"{remaining_seconds} sec"
+
+
+def collect_passive_report(target_url: str) -> dict[str, Any]:
+    dns_context = resolve_target(target_url)
+    http_context = fetch_site(target_url, dns_context)
+    tls_context: dict[str, Any] = {"enabled": False, "skipped": True}
+    parsed_final = urlparse(http_context["final_url"])
+    if parsed_final.scheme == "https":
+        tls_hostname = parsed_final.hostname or dns_context["hostname"]
+        tls_connect_host = (
+            dns_context["ips"][0]
+            if dns_context.get("resolver") != "system" and dns_context.get("ips")
+            else None
+        )
+        tls_context = probe_tls(
+            tls_hostname,
+            parsed_final.port or 443,
+            tls_connect_host,
+        )
+    surface_context = passive_surface_checks(target_url, dns_context, http_context)
+    return build_local_report(
+        target_url,
+        dns_context,
+        http_context,
+        tls_context,
+        surface_context,
+    )
+
+
+def direct_engine_needs_passive_fallback(llm_context: dict[str, Any]) -> bool:
+    return bool(llm_context.get("skipped") or llm_context.get("error"))
 
 
 DIRECT_PROGRESS_MESSAGES = (
@@ -4821,7 +4941,8 @@ def call_llm(target_url: str, report: dict[str, Any]) -> dict[str, Any]:
         "attempts": len(errors),
         "error": "all_hf_credentials_failed",
         "content": (
-            "Agent synthesis failed after trying the configured credential(s). "
+            f"Agent synthesis failed after trying {len(errors)} of "
+            f"{len(token_choices)} configured credential(s). "
             "The deterministic passive analysis report is still available. "
             f"Last error: {last_error}"
         ),
@@ -5001,17 +5122,21 @@ def call_sheepstealer_direct_pentest(
             "sheepstealer_direct",
         )
 
+    attempted_count = len(errors)
     last_error = errors[-1] if errors else "Unknown inference error."
     return {
         "skipped": True,
         "model": PUBLIC_MODEL_LABEL,
         "credential_count": len(token_choices),
-        "attempts": len(errors),
+        "attempts": attempted_count,
         "error": "all_hf_credentials_failed",
         "analysis_mode": "sheepstealer_direct",
         "validation_mode": validation_mode,
         "proof_authorized": proof_authorized,
-        "content": f"sheepstealer direct analysis failed after all configured credential(s). Last error: {last_error}",
+        "content": (
+            f"sheepstealer direct analysis failed after trying {attempted_count} of "
+            f"{len(token_choices)} configured credential(s). Last error: {last_error}"
+        ),
     }
 
 
@@ -5205,30 +5330,36 @@ def create_hf_chat_completion(
     attempt_timeout = max(
         2.0, float(timeout_seconds or HF_CHAT_COMPLETION_TIMEOUT_SECONDS)
     )
+    started_at = time.monotonic()
     try:
-        response = post_hf_router_json(
-            token,
-            "/v1/chat/completions",
-            payload,
-            timeout_seconds=attempt_timeout,
+        client = OpenAI(
+            base_url=HF_BASE_URL,
+            api_key=token,
+            timeout=attempt_timeout,
         )
-        message = response["choices"][0]["message"]
-        return message.get("content") or json.dumps(message)
-    except Exception as fallback_exc:
-        try:
-            client = OpenAI(
-                base_url=HF_BASE_URL,
-                api_key=token,
-                timeout=max(2.0, min(8.0, attempt_timeout)),
-            )
-            completion = client.chat.completions.create(**payload)
-            message = completion.choices[0].message
-            return message.content or str(message)
-        except Exception as original_exc:
+        completion = client.chat.completions.create(**payload)
+        message = completion.choices[0].message
+        return message.content or str(message)
+    except Exception as client_exc:
+        remaining_timeout = attempt_timeout - (time.monotonic() - started_at)
+        if remaining_timeout <= 2.0:
             raise RuntimeError(
-                f"DNS fallback failed ({fallback_exc}); "
-                f"OpenAI client failed ({original_exc.__class__.__name__})."
-            ) from original_exc
+                f"OpenAI client failed ({client_exc.__class__.__name__})."
+            ) from client_exc
+        try:
+            response = post_hf_router_json(
+                token,
+                "/v1/chat/completions",
+                payload,
+                timeout_seconds=remaining_timeout,
+            )
+            message = response["choices"][0]["message"]
+            return message.get("content") or json.dumps(message)
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"OpenAI client failed ({client_exc.__class__.__name__}); "
+                f"DNS fallback failed ({fallback_exc})."
+            ) from fallback_exc
 
 
 def post_hf_router_json(
@@ -5363,12 +5494,18 @@ def redact_llm_error(exc: Exception, secrets: list[str]) -> str:
 
 def build_llm_step_detail(llm_context: dict[str, Any]) -> str:
     credential_count = int(llm_context.get("credential_count") or 0)
+    attempts = int(llm_context.get("attempts") or 0)
     if llm_context.get("error") == "direct_engine_timeout":
         return (
             "The engine stayed active without returning a final answer, so Aelyx closed "
             "the scan and returned a partial report instead of leaving it running."
         )
     if llm_context.get("error"):
+        if attempts and credential_count:
+            return (
+                f"Agent synthesis failed after {attempts} attempted credential(s) "
+                f"out of {credential_count}; the deterministic report remains available."
+            )
         return (
             f"Agent synthesis failed after {credential_count} configured credential(s); "
             "the deterministic report remains available."
