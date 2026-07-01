@@ -487,22 +487,81 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS analysis_runs_status_idx ON analysis_runs(status)",
             "CREATE INDEX IF NOT EXISTS visitor_events_created_at_idx ON visitor_events(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS visitor_events_user_id_idx ON visitor_events(user_id)",
+            "CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS activity_logs_user_id_idx ON activity_logs(user_id)",
+        ):
+            connection.execute(statement)
+        ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
+        for column, definition in {
+            "quota_plan": "TEXT NOT NULL DEFAULT ''",
+            "quota_limit": "INTEGER",
+            "quota_remaining": "INTEGER",
+            "report_json": "JSONB NOT NULL DEFAULT '{}'::jsonb",
+        }.items():
+            ensure_column(connection, "analysis_runs", column, definition)
+        connection.execute("ALTER TABLE analysis_runs ALTER COLUMN user_id DROP NOT NULL")
+        for column, definition in {
+            "user_id": "BIGINT REFERENCES users(id) ON DELETE SET NULL",
+            "session_token_hash": "TEXT NOT NULL DEFAULT ''",
+            "ip_address": "TEXT NOT NULL DEFAULT ''",
+            "country": "TEXT NOT NULL DEFAULT ''",
+            "region": "TEXT NOT NULL DEFAULT ''",
+            "city": "TEXT NOT NULL DEFAULT ''",
+            "timezone": "TEXT NOT NULL DEFAULT ''",
+            "language": "TEXT NOT NULL DEFAULT ''",
+            "accept_language": "TEXT NOT NULL DEFAULT ''",
+            "device_type": "TEXT NOT NULL DEFAULT ''",
+            "browser": "TEXT NOT NULL DEFAULT ''",
+            "os": "TEXT NOT NULL DEFAULT ''",
+            "user_agent": "TEXT NOT NULL DEFAULT ''",
+            "referrer": "TEXT NOT NULL DEFAULT ''",
+            "landing_path": "TEXT NOT NULL DEFAULT ''",
+            "last_path": "TEXT NOT NULL DEFAULT ''",
+            "query_string": "TEXT NOT NULL DEFAULT ''",
+            "utm_source": "TEXT NOT NULL DEFAULT ''",
+            "utm_medium": "TEXT NOT NULL DEFAULT ''",
+            "utm_campaign": "TEXT NOT NULL DEFAULT ''",
+            "utm_term": "TEXT NOT NULL DEFAULT ''",
+            "utm_content": "TEXT NOT NULL DEFAULT ''",
+            "started_at": "TEXT NOT NULL DEFAULT ''",
+            "last_seen_at": "TEXT NOT NULL DEFAULT ''",
+            "duration_seconds": "INTEGER NOT NULL DEFAULT 0",
+            "page_views": "INTEGER NOT NULL DEFAULT 0",
+            "api_hits": "INTEGER NOT NULL DEFAULT 0",
+            "events": "INTEGER NOT NULL DEFAULT 0",
+            "heartbeat_count": "INTEGER NOT NULL DEFAULT 0",
+            "converted_preorder": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            ensure_column(connection, "visitor_sessions", column, definition)
+        for column, definition in {
+            "visitor_id": "TEXT NOT NULL DEFAULT ''",
+            "session_id": "TEXT NOT NULL DEFAULT ''",
+            "user_id": "BIGINT REFERENCES users(id) ON DELETE SET NULL",
+            "ip_address": "TEXT NOT NULL DEFAULT ''",
+            "user_agent": "TEXT NOT NULL DEFAULT ''",
+            "path": "TEXT NOT NULL DEFAULT ''",
+            "target": "TEXT NOT NULL DEFAULT ''",
+            "engine": "TEXT NOT NULL DEFAULT ''",
+            "validation_mode": "TEXT NOT NULL DEFAULT ''",
+            "utm_source": "TEXT NOT NULL DEFAULT ''",
+            "utm_medium": "TEXT NOT NULL DEFAULT ''",
+            "utm_campaign": "TEXT NOT NULL DEFAULT ''",
+            "metadata": "JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            ensure_column(connection, "funnel_events", column, definition)
+        for statement in (
             "CREATE INDEX IF NOT EXISTS visitor_sessions_last_seen_idx ON visitor_sessions(last_seen_at DESC)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_visitor_id_idx ON visitor_sessions(visitor_id)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_country_idx ON visitor_sessions(country)",
             "CREATE INDEX IF NOT EXISTS visitor_sessions_campaign_idx ON visitor_sessions(utm_source, utm_medium, utm_campaign)",
-            "CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS activity_logs_user_id_idx ON activity_logs(user_id)",
             "CREATE INDEX IF NOT EXISTS funnel_events_created_at_idx ON funnel_events(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS funnel_events_event_name_idx ON funnel_events(event_name)",
             "CREATE INDEX IF NOT EXISTS funnel_events_visitor_id_idx ON funnel_events(visitor_id)",
             "CREATE INDEX IF NOT EXISTS funnel_events_session_id_idx ON funnel_events(session_id)",
         ):
             connection.execute(statement)
-        ensure_column(connection, "sessions", "last_seen_at", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(connection, "users", "aegis_waitlist_at", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(connection, "analysis_runs", "report_json", "JSONB NOT NULL DEFAULT '{}'::jsonb")
-        connection.execute("ALTER TABLE analysis_runs ALTER COLUMN user_id DROP NOT NULL")
         for column, definition in {
             "session_id": "TEXT NOT NULL DEFAULT ''",
             "country": "TEXT NOT NULL DEFAULT ''",
@@ -1660,9 +1719,9 @@ def db_dump_payload(limit: int = DB_DUMP_DEFAULT_ROW_LIMIT) -> dict[str, Any]:
 
 
 ADMIN_SESSION_WINDOWS: dict[str, str] = {
-    "day": "last_seen_at::timestamptz >= now() - interval '1 day'",
-    "week": "last_seen_at::timestamptz >= now() - interval '7 days'",
-    "month": "last_seen_at::timestamptz >= now() - interval '30 days'",
+    "day": "NULLIF(last_seen_at, '')::timestamptz >= now() - interval '1 day'",
+    "week": "NULLIF(last_seen_at, '')::timestamptz >= now() - interval '7 days'",
+    "month": "NULLIF(last_seen_at, '')::timestamptz >= now() - interval '30 days'",
     "all": "TRUE",
 }
 ALLOWED_FUNNEL_EVENTS = (
@@ -1676,17 +1735,64 @@ ALLOWED_FUNNEL_EVENTS = (
 )
 ADMIN_HUMAN_SESSION_FILTER = """
 NOT (
-    device_type = 'bot'
-    OR lower(user_agent) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
+    COALESCE(device_type, '') = 'bot'
+    OR lower(COALESCE(user_agent, '')) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
     OR lower(coalesce(landing_path, '') || ' ' || coalesce(last_path, '') || ' ' || coalesce(query_string, '')) ~ '(^|/)(wp-[a-z0-9_-]+|xmlrpc|wlwmanifest)|/meta\\.json|(^|/)\\.env|(^|/)\\.git|config\\.js|config\\.json|settings\\.js|/api/config|/api/env|/js/env\\.js|/js/config\\.js|/sitemap|/robots\\.txt|/llms\\.txt|/\\.well-known/'
 )
 """
 ADMIN_HUMAN_FUNNEL_FILTER = """
 NOT (
-    lower(user_agent) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
+    lower(COALESCE(user_agent, '')) ~ '(bot|crawler|spider|preview|slurp|bingbot|googlebot|facebookexternalhit|whatsapp|telegrambot|curl|wget|python-requests|go-http-client|httpclient|zgrab|masscan|nmap|nikto|semrush|ahrefs|petalbot|bytespider)'
     OR lower(coalesce(path, '')) ~ '(^|/)(wp-[a-z0-9_-]+|xmlrpc|wlwmanifest)|/meta\\.json|(^|/)\\.env|(^|/)\\.git|config\\.js|config\\.json|settings\\.js|/api/config|/api/env|/js/env\\.js|/js/config\\.js|/sitemap|/robots\\.txt|/llms\\.txt|/\\.well-known/'
 )
 """
+
+
+def empty_admin_session_stats() -> dict[str, int]:
+    return {
+        "sessions": 0,
+        "external_sessions": 0,
+        "session_visitors": 0,
+        "external_visitors": 0,
+        "signed_in_visitors": 0,
+        "signed_up_visitors": 0,
+        "avg_duration_seconds": 0,
+        "max_duration_seconds": 0,
+        "avg_page_views": 0,
+        "page_views": 0,
+        "engaged_sessions": 0,
+        "bounce_sessions": 0,
+        "preorder_conversions": 0,
+    }
+
+
+def empty_admin_visitor_insights() -> dict[str, Any]:
+    return {
+        window_id: {
+            "session_stats": empty_admin_session_stats(),
+            "visitors": [],
+            "sessions": [],
+            "campaigns": [],
+        }
+        for window_id in ADMIN_SESSION_WINDOWS
+    }
+
+
+def empty_admin_funnel_insights() -> dict[str, Any]:
+    return {
+        window_id: {
+            "events": [
+                {"event_name": name, "events": 0, "visitors": 0}
+                for name in ALLOWED_FUNNEL_EVENTS
+            ],
+            "campaigns": [],
+        }
+        for window_id in ADMIN_SESSION_WINDOWS
+    }
+
+
+def log_admin_dashboard_error(section: str, exc: Exception) -> None:
+    print(f"Aegis admin dashboard {section} failed: {exc}")
 
 
 def account_runs_payload(user: dict[str, Any], limit: int = 8) -> dict[str, Any]:
@@ -1997,39 +2103,48 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
         ).fetchall()
         campaign_rows = connection.execute(
             f"""
+            WITH session_campaigns AS (
+                SELECT
+                    COALESCE(NULLIF(utm_source, ''), 'direct') AS source,
+                    COALESCE(NULLIF(utm_medium, ''), 'none') AS medium,
+                    COALESCE(NULLIF(utm_campaign, ''), 'none') AS campaign,
+                    COUNT(*)::int AS sessions,
+                    COUNT(DISTINCT visitor_id)::int AS visitors,
+                    COALESCE(SUM(page_views), 0)::int AS page_views,
+                    COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
+                    COUNT(DISTINCT visitor_id) FILTER (
+                        WHERE user_id IS NOT NULL
+                        OR visitor_id IN (
+                            SELECT visitor_id
+                            FROM funnel_events
+                            WHERE event_name = 'signup_completed'
+                        )
+                    )::int AS signups,
+                    COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions
+                FROM visitor_sessions
+                WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
+                GROUP BY 1, 2, 3
+            ),
+            target_campaigns AS (
+                SELECT
+                    COALESCE(NULLIF(utm_source, ''), 'direct') AS source,
+                    COALESCE(NULLIF(utm_medium, ''), 'none') AS medium,
+                    COALESCE(NULLIF(utm_campaign, ''), 'none') AS campaign,
+                    COUNT(DISTINCT NULLIF(target, ''))::int AS targets
+                FROM funnel_events
+                WHERE ({funnel_time_clause}) AND {ADMIN_HUMAN_FUNNEL_FILTER}
+                  AND NULLIF(target, '') IS NOT NULL
+                GROUP BY 1, 2, 3
+            )
             SELECT
-                COALESCE(NULLIF(utm_source, ''), 'direct') AS source,
-                COALESCE(NULLIF(utm_medium, ''), 'none') AS medium,
-                COALESCE(NULLIF(utm_campaign, ''), 'none') AS campaign,
-                COUNT(*)::int AS sessions,
-                COUNT(DISTINCT visitor_id)::int AS visitors,
-                COALESCE(SUM(page_views), 0)::int AS page_views,
-                COALESCE(ROUND(AVG(duration_seconds))::int, 0) AS avg_duration_seconds,
-                COUNT(DISTINCT visitor_id) FILTER (
-                    WHERE user_id IS NOT NULL
-                    OR visitor_id IN (
-                        SELECT visitor_id
-                        FROM funnel_events
-                        WHERE event_name = 'signup_completed'
-                    )
-                )::int AS signups,
-                COUNT(*) FILTER (WHERE converted_preorder = 1)::int AS conversions,
-                COALESCE(
-                    (
-                        SELECT COUNT(DISTINCT NULLIF(target, ''))::int
-                        FROM funnel_events
-                        WHERE ({funnel_time_clause}) AND {ADMIN_HUMAN_FUNNEL_FILTER}
-                          AND COALESCE(NULLIF(funnel_events.utm_source, ''), 'direct') = COALESCE(NULLIF(visitor_sessions.utm_source, ''), 'direct')
-                          AND COALESCE(NULLIF(funnel_events.utm_medium, ''), 'none') = COALESCE(NULLIF(visitor_sessions.utm_medium, ''), 'none')
-                          AND COALESCE(NULLIF(funnel_events.utm_campaign, ''), 'none') = COALESCE(NULLIF(visitor_sessions.utm_campaign, ''), 'none')
-                          AND NULLIF(target, '') IS NOT NULL
-                    ),
-                    0
-                ) AS targets
-            FROM visitor_sessions
-            WHERE ({session_clause}) AND {ADMIN_HUMAN_SESSION_FILTER}
-            GROUP BY 1, 2, 3
-            ORDER BY sessions DESC, conversions DESC
+                session_campaigns.*,
+                COALESCE(target_campaigns.targets, 0) AS targets
+            FROM session_campaigns
+            LEFT JOIN target_campaigns
+              ON target_campaigns.source = session_campaigns.source
+             AND target_campaigns.medium = session_campaigns.medium
+             AND target_campaigns.campaign = session_campaigns.campaign
+            ORDER BY session_campaigns.sessions DESC, session_campaigns.conversions DESC
             LIMIT 24
             """
         ).fetchall()
@@ -2040,6 +2155,35 @@ def admin_visitor_insights(connection: psycopg.Connection) -> dict[str, Any]:
             "campaigns": [row_to_dict(row) for row in campaign_rows],
         }
     return insights
+
+
+def admin_basic_user_rows(connection: psycopg.Connection) -> list[dict[str, Any]]:
+    return connection.execute(
+        """
+        SELECT
+            id,
+            username,
+            email,
+            provider,
+            plan,
+            is_admin,
+            aegis_waitlist_at,
+            created_at,
+            updated_at,
+            '' AS auth_last_seen_at,
+            0::int AS auth_sessions,
+            '' AS visit_last_seen_at,
+            0::int AS linked_human_visitors,
+            0::int AS page_views,
+            0::int AS run_count,
+            '' AS last_run_at,
+            '' AS last_target,
+            ARRAY[]::text[] AS targets
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 200
+        """
+    ).fetchall()
 
 
 def admin_dashboard_payload() -> dict[str, Any]:
@@ -2072,96 +2216,125 @@ def admin_dashboard_payload() -> dict[str, Any]:
             LIMIT 50
             """
         ).fetchall()
-        user_rows = connection.execute(
-            f"""
-            SELECT
-                users.id,
-                users.username,
-                users.email,
-                users.provider,
-                users.plan,
-                users.is_admin,
-                users.aegis_waitlist_at,
-                users.created_at,
-                users.updated_at,
-                (SELECT MAX(last_seen_at) FROM sessions WHERE sessions.user_id = users.id) AS auth_last_seen_at,
-                (SELECT COUNT(*)::int FROM sessions WHERE sessions.user_id = users.id) AS auth_sessions,
-                (
-                    SELECT MAX(last_seen_at)
-                    FROM visitor_sessions
-                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
-                ) AS visit_last_seen_at,
-                (
-                    SELECT COUNT(DISTINCT visitor_id)::int
-                    FROM visitor_sessions
-                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
-                ) AS linked_human_visitors,
-                (
-                    SELECT COALESCE(SUM(page_views), 0)::int
-                    FROM visitor_sessions
-                    WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
-                ) AS page_views,
-                (
-                    SELECT COUNT(*)::int
-                    FROM analysis_runs
-                    WHERE analysis_runs.user_id = users.id
-                ) AS run_count,
-                (
-                    SELECT MAX(started_at)
-                    FROM analysis_runs
-                    WHERE analysis_runs.user_id = users.id
-                ) AS last_run_at,
-                (
-                    SELECT target
-                    FROM (
-                        SELECT target, started_at AS seen_at
+        try:
+            user_rows = connection.execute(
+                f"""
+                SELECT
+                    users.id,
+                    users.username,
+                    users.email,
+                    users.provider,
+                    users.plan,
+                    users.is_admin,
+                    users.aegis_waitlist_at,
+                    users.created_at,
+                    users.updated_at,
+                    (SELECT MAX(last_seen_at) FROM sessions WHERE sessions.user_id = users.id) AS auth_last_seen_at,
+                    (SELECT COUNT(*)::int FROM sessions WHERE sessions.user_id = users.id) AS auth_sessions,
+                    (
+                        SELECT MAX(last_seen_at)
+                        FROM visitor_sessions
+                        WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                    ) AS visit_last_seen_at,
+                    (
+                        SELECT COUNT(DISTINCT visitor_id)::int
+                        FROM visitor_sessions
+                        WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                    ) AS linked_human_visitors,
+                    (
+                        SELECT COALESCE(SUM(page_views), 0)::int
+                        FROM visitor_sessions
+                        WHERE visitor_sessions.user_id = users.id AND {ADMIN_HUMAN_SESSION_FILTER}
+                    ) AS page_views,
+                    (
+                        SELECT COUNT(*)::int
                         FROM analysis_runs
                         WHERE analysis_runs.user_id = users.id
-                        UNION ALL
-                        SELECT target, created_at AS seen_at
-                        FROM funnel_events
-                        WHERE funnel_events.user_id = users.id
-                    ) AS user_targets
-                    WHERE NULLIF(target, '') IS NOT NULL
-                    ORDER BY seen_at DESC
-                    LIMIT 1
-                ) AS last_target,
-                COALESCE(
+                    ) AS run_count,
                     (
-                        SELECT ARRAY_AGG(DISTINCT target)
+                        SELECT MAX(started_at)
+                        FROM analysis_runs
+                        WHERE analysis_runs.user_id = users.id
+                    ) AS last_run_at,
+                    (
+                        SELECT target
                         FROM (
-                            SELECT target
+                            SELECT target, started_at AS seen_at
                             FROM analysis_runs
                             WHERE analysis_runs.user_id = users.id
                             UNION ALL
-                            SELECT target
+                            SELECT target, created_at AS seen_at
                             FROM funnel_events
                             WHERE funnel_events.user_id = users.id
                         ) AS user_targets
                         WHERE NULLIF(target, '') IS NOT NULL
-                    ),
-                    ARRAY[]::text[]
-                ) AS targets
-            FROM users
-            ORDER BY users.created_at DESC
-            LIMIT 200
-            """
-        ).fetchall()
-        summary = connection.execute(
-            f"""
-            SELECT
-                (SELECT COUNT(*) FROM analysis_runs) AS runs,
-                (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
-                (SELECT COUNT(*) FROM users WHERE is_admin = FALSE) AS user_accounts,
-                (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
-                (SELECT COUNT(DISTINCT visitor_id) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS unique_visitors,
-                (SELECT COUNT(*) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS visitor_sessions,
-                (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS avg_session_seconds,
-                (SELECT COUNT(*) FROM visitor_sessions WHERE NOT ({ADMIN_HUMAN_SESSION_FILTER})) AS filtered_noise_sessions
-            """
-        ).fetchone()
-        visitor_insights = admin_visitor_insights(connection)
-        funnel_insights = admin_funnel_insights(connection)
+                        ORDER BY seen_at DESC
+                        LIMIT 1
+                    ) AS last_target,
+                    COALESCE(
+                        (
+                            SELECT ARRAY_AGG(DISTINCT target)
+                            FROM (
+                                SELECT target
+                                FROM analysis_runs
+                                WHERE analysis_runs.user_id = users.id
+                                UNION ALL
+                                SELECT target
+                                FROM funnel_events
+                                WHERE funnel_events.user_id = users.id
+                            ) AS user_targets
+                            WHERE NULLIF(target, '') IS NOT NULL
+                        ),
+                        ARRAY[]::text[]
+                    ) AS targets
+                FROM users
+                ORDER BY users.created_at DESC
+                LIMIT 200
+                """
+            ).fetchall()
+        except Exception as exc:
+            log_admin_dashboard_error("users", exc)
+            connection.rollback()
+            user_rows = admin_basic_user_rows(connection)
+        try:
+            summary = connection.execute(
+                f"""
+                SELECT
+                    (SELECT COUNT(*) FROM analysis_runs) AS runs,
+                    (SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')) AS live_runs,
+                    (SELECT COUNT(*) FROM users WHERE is_admin = 0) AS user_accounts,
+                    (SELECT COUNT(*) FROM users WHERE aegis_waitlist_at <> '') AS preorders,
+                    (SELECT COUNT(DISTINCT visitor_id) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS unique_visitors,
+                    (SELECT COUNT(*) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS visitor_sessions,
+                    (SELECT COALESCE(ROUND(AVG(duration_seconds))::int, 0) FROM visitor_sessions WHERE {ADMIN_HUMAN_SESSION_FILTER}) AS avg_session_seconds,
+                    (SELECT COUNT(*) FROM visitor_sessions WHERE NOT ({ADMIN_HUMAN_SESSION_FILTER})) AS filtered_noise_sessions
+                """
+            ).fetchone()
+        except Exception as exc:
+            log_admin_dashboard_error("summary", exc)
+            connection.rollback()
+            summary = {
+                "runs": len(run_rows),
+                "live_runs": len(live_rows),
+                "user_accounts": len([row for row in user_rows if not row["is_admin"]]),
+                "preorders": len(preorder_rows),
+                "unique_visitors": 0,
+                "visitor_sessions": 0,
+                "avg_session_seconds": 0,
+                "filtered_noise_sessions": 0,
+            }
+        try:
+            visitor_insights = admin_visitor_insights(connection)
+        except Exception as exc:
+            log_admin_dashboard_error("visitor insights", exc)
+            connection.rollback()
+            visitor_insights = empty_admin_visitor_insights()
+        try:
+            funnel_insights = admin_funnel_insights(connection)
+        except Exception as exc:
+            log_admin_dashboard_error("funnel insights", exc)
+            connection.rollback()
+            funnel_insights = empty_admin_funnel_insights()
 
     return {
         "summary": row_to_dict(summary),
@@ -2217,6 +2390,7 @@ async def capture_visit_events(request: Request, call_next):
 
 
 @app.get("/")
+@app.get("/admin")
 def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 

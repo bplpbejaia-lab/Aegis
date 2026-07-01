@@ -49,6 +49,12 @@ const adminFunnel = document.querySelector("#admin-funnel");
 const adminFunnelCampaigns = document.querySelector("#admin-funnel-campaigns");
 const adminPeriodTabs = document.querySelectorAll("[data-admin-period]");
 const adminPeriodNote = document.querySelector("#admin-period-note");
+const adminProfileName = document.querySelector("#admin-profile-name");
+const adminProfileMetrics = document.querySelector("#admin-profile-metrics");
+const adminSignupRate = document.querySelector("#admin-signup-rate");
+const adminTargetIntent = document.querySelector("#admin-target-intent");
+const adminFocusChart = document.querySelector("#admin-focus-chart");
+const adminMarketingBars = document.querySelector("#admin-marketing-bars");
 const authMessage = document.querySelector("#auth-message");
 const logoutButton = document.querySelector("#logout-button");
 const sessionButton = document.querySelector("#session-button");
@@ -101,6 +107,7 @@ const traceItems = new Map();
 const SESSION_KEY = "aegisSessionToken";
 const VISITOR_HEARTBEAT_MS = 20000;
 const ADMIN_REFRESH_MS = 15000;
+const ADMIN_PATH = "/admin";
 const ADMIN_PERIOD_LABELS = {
   day: "Rolling 24h",
   week: "Last 7 days",
@@ -140,6 +147,7 @@ async function initializeApp() {
   initializeCustomSelects();
   await loadConfig();
   await restoreSession();
+  openAdminRouteIfNeeded();
   initializeGoogleSignIn();
   startVisitorHeartbeat();
   trackCtaViewed();
@@ -406,6 +414,7 @@ async function authenticate(endpoint, payload) {
     currentUser = data.user;
     renderSession();
     closeAuthModal();
+    openAdminRouteIfNeeded();
     showAuthMessage(
       endpoint.includes("signup")
         ? "Account created."
@@ -918,10 +927,28 @@ function openAccountModal() {
   }
 }
 
-function openAdminDashboardPage() {
+function openAdminRouteIfNeeded() {
+  if (window.location.pathname !== ADMIN_PATH) return;
+  if (currentUser?.is_admin) {
+    openAdminDashboardPage({ updateHistory: false });
+    return;
+  }
+  openAuthModal("login");
+}
+
+function leaveAdminRouteIfNeeded() {
+  if (window.location.pathname === ADMIN_PATH) {
+    window.history.pushState(null, "", "/");
+  }
+}
+
+function openAdminDashboardPage({ updateHistory = true } = {}) {
   if (!currentUser?.is_admin || !accountModal || !adminDashboard) {
     if (!currentUser) openAuthModal("login");
     return;
+  }
+  if (updateHistory && window.location.pathname !== ADMIN_PATH) {
+    window.history.pushState(null, "", ADMIN_PATH);
   }
   closeAuthModal();
   closeReportModal();
@@ -938,9 +965,11 @@ function openAdminDashboardPage() {
 
 function closeAccountModal() {
   if (!accountModal) return;
+  const wasAdminPage = accountModal.classList.contains("is-admin-page");
   accountModal.hidden = true;
   accountModal.classList.remove("is-admin-page");
   stopAdminDashboardRefresh();
+  if (wasAdminPage) leaveAdminRouteIfNeeded();
   if (reportModal?.hidden !== false && authModal?.hidden !== false) {
     document.body.classList.remove("modal-open");
   }
@@ -1023,6 +1052,7 @@ function renderAdminDashboard(data) {
   const summary = dashboard.summary || {};
   const visitors = insights.visitors || [];
   renderAdminPeriodTabs();
+  renderAdminVisuals(dashboard, insights, funnel);
   if (adminSummary) {
     adminSummary.innerHTML = [
       ["Runs", summary.runs || 0],
@@ -1208,6 +1238,93 @@ function renderAdminUsers(container, users) {
             }
           </ol>
         </article>
+      `;
+    })
+    .join("");
+}
+
+function renderAdminVisuals(dashboard, insights, funnel) {
+  const stats = insights?.session_stats || {};
+  const campaigns = insights?.campaigns || [];
+  const visitors = insights?.visitors || [];
+  const humans = Number(stats.session_visitors || dashboard?.summary?.unique_visitors || 0);
+  const signups = Number(stats.signed_up_visitors || 0);
+  const visits = Number(stats.sessions || dashboard?.summary?.visitor_sessions || 0);
+  const targets = visitors.reduce((total, visitor) => total + Number(visitor.target_attempt_count || 0), 0);
+  const signupRate = humans ? Math.round((signups / humans) * 100) : 0;
+  if (adminProfileName) adminProfileName.textContent = currentUser?.username || "Admin";
+  if (adminProfileMetrics) {
+    adminProfileMetrics.innerHTML = [
+      ["Humans", humans],
+      ["Signups", signups],
+      ["Targets", targets],
+    ]
+      .map(([label, value]) => `<span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(label)}</small></span>`)
+      .join("");
+  }
+  if (adminSignupRate) adminSignupRate.textContent = `${signupRate}%`;
+  if (adminTargetIntent) adminTargetIntent.textContent = String(targets);
+  renderAdminFocusChart(visits, signups, targets, funnel?.events || []);
+  renderAdminMarketingBars(campaigns);
+}
+
+function renderAdminFocusChart(visits, signups, targets, events) {
+  if (!adminFocusChart) return;
+  const eventTotal = (events || []).reduce((total, item) => total + Number(item.events || 0), 0);
+  const values = [visits, Math.max(1, eventTotal), signups, targets].map((value) => Number(value || 0));
+  const max = Math.max(1, ...values);
+  const redPoints = values.map((value, index) => chartPoint(index, value, max, 42));
+  const bluePoints = [targets, signups, visits, eventTotal].map((value, index) => chartPoint(index, value, max, 58));
+  adminFocusChart.innerHTML = `
+    <svg viewBox="0 0 420 160" role="img" aria-label="Human traffic chart">
+      <defs>
+        <pattern id="adminDots" width="12" height="12" patternUnits="userSpaceOnUse">
+          <circle cx="1.5" cy="1.5" r="1" fill="rgba(17,17,17,.12)" />
+        </pattern>
+      </defs>
+      <rect width="420" height="160" rx="22" fill="url(#adminDots)" />
+      <path d="${smoothPath(redPoints)}" fill="none" stroke="#ff6b6b" stroke-width="4" stroke-linecap="round" />
+      <path d="${smoothPath(bluePoints)}" fill="none" stroke="#4d7cff" stroke-width="4" stroke-linecap="round" />
+      ${redPoints.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="5" fill="#fff" stroke="#ff6b6b" stroke-width="3" />`).join("")}
+      <text x="24" y="140" fill="#888" font-size="12">Visits</text>
+      <text x="160" y="140" fill="#888" font-size="12">Intent</text>
+      <text x="285" y="140" fill="#888" font-size="12">Signup</text>
+      <text x="360" y="140" fill="#888" font-size="12">Target</text>
+    </svg>
+  `;
+}
+
+function chartPoint(index, value, max, bias) {
+  const x = 42 + index * 112;
+  const y = 124 - Math.round((Number(value || 0) / max) * 84) + (index % 2 ? bias - 50 : 0);
+  return { x, y: Math.max(22, Math.min(126, y)) };
+}
+
+function smoothPath(points) {
+  if (!points.length) return "";
+  return points
+    .map((point, index) => `${index ? "L" : "M"}${point.x},${point.y}`)
+    .join(" ");
+}
+
+function renderAdminMarketingBars(campaigns) {
+  if (!adminMarketingBars) return;
+  campaigns = Array.isArray(campaigns) ? campaigns.slice(0, 5) : [];
+  if (!campaigns.length) {
+    adminMarketingBars.innerHTML = '<p class="admin-empty">No marketing data.</p>';
+    return;
+  }
+  const max = Math.max(1, ...campaigns.map((campaign) => Number(campaign.visitors || campaign.sessions || 0)));
+  adminMarketingBars.innerHTML = campaigns
+    .map((campaign) => {
+      const value = Number(campaign.signups || campaign.visitors || campaign.sessions || 0);
+      const width = Math.max(8, Math.round((value / max) * 100));
+      return `
+        <div class="admin-marketing-row">
+          <span>${escapeHtml(campaign.source || "direct")}</span>
+          <i><b style="width:${width}%"></b></i>
+          <strong>${escapeHtml(value)}</strong>
+        </div>
       `;
     })
     .join("");
