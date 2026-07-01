@@ -2922,11 +2922,11 @@ async def run_analysis(
             )
             strategy_step = record_step(
                 "agent_strategy",
-                "LLM strategy planning",
-                "llm_strategy",
+                "Scanning approach",
+                "scan_strategy",
                 "running",
                 (
-                    "The LLM is choosing the assessment approach, priority risks, "
+                    "Scanning is choosing the assessment approach, priority risks, "
                     "and evidence it wants from the tool layer."
                 ),
             )
@@ -2958,7 +2958,7 @@ async def run_analysis(
 
             toolbox_step = record_step(
                 "agent_toolbox",
-                "LLM-guided tool run",
+                "Guided tool run",
                 "authorized_toolbox",
                 "running",
                 (
@@ -2980,7 +2980,7 @@ async def run_analysis(
                 {
                     "status": "complete",
                     "detail": (
-                        "LLM tool evidence ready: "
+                        "Tool evidence ready: "
                         f"{len(toolbox_report.get('vulnerabilities', []))} finding(s), "
                         f"{len(advanced.get('crawl', []))} page(s), "
                         f"{len(advanced.get('javascript', []))} JavaScript asset(s), "
@@ -3122,7 +3122,7 @@ async def run_analysis(
                     "authorized_toolbox",
                     "running",
                     (
-                        "The final LLM provider did not return a full report, so Aelyx "
+                        "The analysis provider did not return a full report, so Aelyx "
                         "is returning the already-collected tool evidence instead of leaving the run empty."
                     ),
                 )
@@ -6074,7 +6074,7 @@ def build_direct_agent_strategy_prompt(
 ) -> str:
     validation_rules = build_validation_mode_rules(validation_mode, proof_authorized)
     return (
-        "You are the lead LLM pentest strategist inside Aelyx. Plan the highest-value "
+        "You are the lead pentest strategist inside Aelyx. Plan the highest-value "
         "authorized assessment approach before tools run.\n\n"
         f"Target scope: {target_url}\n"
         f"Validation mode: {validation_mode}. Proof authorization: {proof_authorized}.\n"
@@ -6102,18 +6102,18 @@ def build_direct_agent_strategy_prompt(
 def build_strategy_step_detail(strategy: dict[str, Any]) -> str:
     if strategy.get("error") == "strategy_fallback":
         return (
-            "LLM strategy provider was unavailable, so Aelyx switched to a max-coverage "
-            "authorized tool plan and will still give the final LLM all evidence."
+            "Strategy planning was unavailable, so Aelyx switched to a max-coverage "
+            "authorized tool plan and will still give the final agent pass all evidence."
         )
     if strategy.get("error"):
         return (
-            "LLM strategy returned with an error; the scan will continue with broad "
+            "Strategy planning returned with an error; the scan will continue with broad "
             "authorized evidence collection."
         )
     preview = llm_preview(strategy.get("content", ""), 260)
     if preview:
-        return f"LLM strategy ready: {preview}"
-    return "LLM strategy ready."
+        return f"Scan approach ready: {preview}"
+    return "Scan approach ready."
 
 
 def call_sheepstealer_direct_pentest(
@@ -6234,7 +6234,7 @@ def build_direct_report(
                 "analysis_mode": analysis_mode,
                 "validation_mode": validation_mode,
                 "proof_authorized": proof_authorized,
-                "llm_provider": llm_context.get("model", ""),
+                "analysis_provider": llm_context.get("model", ""),
             }
         )
         technologies = set(direct_report.get("technologies") or [])
@@ -6368,7 +6368,7 @@ def build_direct_pentest_prompt(
     if evidence_report:
         compact_evidence = compact_direct_evidence(evidence_report)
         evidence_block = (
-            "Aelyx LLM-guided tool evidence JSON:\n"
+            "Aelyx guided tool evidence JSON:\n"
             f"{json.dumps(compact_evidence, indent=2)}\n\n"
             "Use this evidence as authoritative. The tool layer used bounded, non-destructive "
             "DNS/TLS/HTTP/header/CORS/robots/sitemap/crawl/JavaScript/public-file checks. "
@@ -6455,7 +6455,7 @@ def compact_direct_evidence(report: dict[str, Any]) -> dict[str, Any]:
             for finding in report.get("vulnerabilities", [])[:60]
         ],
         "toolbox": {
-            "llm_strategy": {
+            "agent_strategy": {
                 "status": "fallback" if surface.get("agent_strategy", {}).get("skipped") else "ready",
                 "content": surface.get("agent_strategy", {}).get("content", ""),
             },

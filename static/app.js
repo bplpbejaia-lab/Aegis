@@ -226,9 +226,9 @@ const SCAN_STEP_META = {
   },
   agent_strategy: {
     label: "Strategy",
-    runningTitle: "LLM choosing approach",
-    completeTitle: "LLM strategy ready",
-    runningDetail: "The model is deciding which risk paths, tools, and evidence matter most for this target.",
+    runningTitle: "Scanning approach",
+    completeTitle: "Scan approach ready",
+    runningDetail: "Aelyx is deciding which risk paths, tools, and evidence matter most for this target.",
   },
   agent_toolbox: {
     label: "Tools",
@@ -240,7 +240,7 @@ const SCAN_STEP_META = {
     label: "Evidence",
     runningTitle: "Returning tool evidence",
     completeTitle: "Evidence report ready",
-    runningDetail: "The final model provider did not complete, so Aelyx is returning the collected evidence report.",
+    runningDetail: "The analysis provider did not complete, so Aelyx is returning the collected evidence report.",
   },
   headers: {
     label: "Headers",
@@ -258,13 +258,13 @@ const SCAN_STEP_META = {
     label: "Aelyx",
     runningTitle: "Aelyx engine working",
     completeTitle: "Aelyx engine finished",
-    runningDetail: "The LLM is synthesizing its strategy and tool evidence into the final report. This can take a few minutes.",
+    runningDetail: "Aelyx is turning the strategy and tool evidence into the final report. This can take a few minutes.",
   },
   sheepstealer_direct: {
     label: "sheepstealer",
     runningTitle: "sheepstealer working",
     completeTitle: "sheepstealer finished",
-    runningDetail: "The hosted LLM is synthesizing its strategy and tool evidence into the final report. This can take a few minutes when the provider is busy.",
+    runningDetail: "The hosted engine is turning the strategy and tool evidence into the final report. This can take a few minutes when the provider is busy.",
   },
 };
 let runStartedAt = 0;
