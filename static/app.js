@@ -8,6 +8,7 @@ const proofConsentRow = document.querySelector("#proof-consent-row");
 const runButton = document.querySelector("#run-button");
 const runLabel = document.querySelector("#run-label");
 const stopButton = document.querySelector("#stop-button");
+const stopScanButtons = document.querySelectorAll("#stop-button, [data-stop-scan]");
 const menuToggle = document.querySelector("#menu-toggle");
 const mobileMenu = document.querySelector("#mobile-menu");
 const authPanel = document.querySelector("#auth-panel");
@@ -296,8 +297,10 @@ form?.addEventListener("submit", async (event) => {
   await runAnalysis();
 });
 
-stopButton?.addEventListener("click", () => {
-  stopCurrentRun();
+stopScanButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    stopCurrentRun();
+  });
 });
 
 menuToggle?.addEventListener("click", () => {
@@ -1806,7 +1809,7 @@ async function runAnalysis() {
   runButton.disabled = true;
   runButton.classList.add("is-running");
   workBoard?.classList.add("is-running");
-  if (stopButton) stopButton.hidden = false;
+  setStopControlsVisible(true);
   runLabel.textContent = "Thinking";
   agentState.textContent = "Running";
   agentDetail.textContent = "Preparing tools.";
@@ -1863,7 +1866,7 @@ async function runAnalysis() {
     runButton.disabled = false;
     runButton.classList.remove("is-running");
     workBoard?.classList.remove("is-running");
-    if (stopButton) stopButton.hidden = true;
+    setStopControlsVisible(false);
     currentRunController = null;
     runLabel.textContent = "Scan";
     window.clearInterval(timer);
@@ -1874,10 +1877,7 @@ async function runAnalysis() {
 async function stopCurrentRun() {
   if (!currentRunId || isStoppingRun) return;
   isStoppingRun = true;
-  if (stopButton) {
-    stopButton.disabled = true;
-    stopButton.textContent = "Stopping";
-  }
+  setStopControlsVisible(true, { disabled: true, label: "Stopping" });
   agentState.textContent = "Stopping";
   agentDetail.textContent = "Cancelling the active analysis.";
   workStatus.textContent = "Stopping";
@@ -1902,12 +1902,17 @@ function markRunStopped() {
   agentDetail.textContent = "Analysis cancelled by user.";
   workStatus.textContent = "Stopped";
   workDetail.textContent = "Analysis cancelled by user.";
-  if (stopButton) {
-    stopButton.hidden = true;
-    stopButton.disabled = false;
-    stopButton.textContent = "Stop";
-  }
+  setStopControlsVisible(false);
   window.clearInterval(timer);
+}
+
+function setStopControlsVisible(visible, options = {}) {
+  const label = options.label || "Stop scan";
+  stopScanButtons.forEach((button) => {
+    button.hidden = !visible;
+    button.disabled = Boolean(options.disabled);
+    button.textContent = label;
+  });
 }
 
 function updateProofConsentVisibility() {
@@ -1943,6 +1948,7 @@ function handleEvent(message) {
     workStatus.textContent = "Complete";
     workDetail.textContent = `Report completed in ${formatDuration(data.duration_ms)}.`;
     workProgressLabel.textContent = "100%";
+    workBoard?.style.setProperty("--scan-progress", "100%");
     workBoard?.classList.remove("is-running");
     hideThinkingModal();
     loadWorkspaceHistory();
@@ -1970,6 +1976,7 @@ function resetRun(target) {
   closeReportModal();
   setReportNavReady(false);
   progressBar.style.setProperty("--progress", "0%");
+  workBoard?.style.setProperty("--scan-progress", "0%");
   resetWorkBoard();
 
   traceList.innerHTML = `
@@ -2024,7 +2031,7 @@ function scanStepDetail(step) {
 function scanStepStateLabel(step) {
   const meta = scanStepMeta(step);
   if (step?.status === "complete") {
-    if (step.result?.error === "direct_engine_timeout") return "Timed out";
+    if (step.result?.error === "direct_engine_timeout") return "Closed";
     if (step.result?.skipped) return "Returned";
     return "Done";
   }
@@ -3188,6 +3195,7 @@ function updateProgress() {
   }
   const progress = Math.min(100, Math.round(((completed + runningBonus) / totalSteps) * 100));
   progressBar.style.setProperty("--progress", `${progress}%`);
+  workBoard?.style.setProperty("--scan-progress", `${progress}%`);
   workProgressLabel.textContent = `${progress}%`;
 }
 

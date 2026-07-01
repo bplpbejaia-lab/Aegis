@@ -80,7 +80,7 @@ LOCAL_BRIDGE_DIR = os.getenv(
 )
 LOCAL_BRIDGE_TIMEOUT_SECONDS = int(os.getenv("AEGIS_LOCAL_BRIDGE_TIMEOUT_SECONDS", "1800"))
 DIRECT_ENGINE_TIMEOUT_SECONDS = max(
-    30, int(os.getenv("AEGIS_DIRECT_ENGINE_TIMEOUT_SECONDS", "180"))
+    300, int(os.getenv("AEGIS_DIRECT_ENGINE_TIMEOUT_SECONDS", "900"))
 )
 DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS = max(
     4.0, float(os.getenv("AEGIS_DIRECT_ENGINE_PROGRESS_INTERVAL_SECONDS", "8"))
@@ -3332,11 +3332,10 @@ def direct_progress_detail(
     timeout_seconds: int,
 ) -> str:
     message = DIRECT_PROGRESS_MESSAGES[update_index % len(DIRECT_PROGRESS_MESSAGES)]
-    timeout_label = human_duration(timeout_seconds * 1000)
     elapsed_label = human_duration(elapsed_ms)
     return (
         f"{message} {engine_title} is still active. "
-        f"Elapsed: {elapsed_label}. Safety limit: {timeout_label}."
+        f"Elapsed: {elapsed_label}. You can stop the scan any time."
     )
 
 
@@ -3360,10 +3359,10 @@ def direct_timeout_context(
         "validation_mode": validation_mode,
         "proof_authorized": proof_authorized,
         "content": (
-            f"{engine_title} did not finish within the {elapsed_label} safety window. "
-            "Aelyx closed the run instead of leaving it stuck. No AI-generated findings "
-            "were confirmed before the timeout; retry when the provider is responsive or "
-            "lower the requested validation depth."
+            f"{engine_title} stayed active for {elapsed_label} without returning a final "
+            "answer. Aelyx closed the run instead of leaving it stuck. No AI-generated "
+            "findings were confirmed before the engine stopped; retry when the provider "
+            "is responsive or lower the requested validation depth."
         ),
         "target_url": target_url,
         "elapsed_ms": elapsed_ms,
@@ -5365,13 +5364,9 @@ def redact_llm_error(exc: Exception, secrets: list[str]) -> str:
 def build_llm_step_detail(llm_context: dict[str, Any]) -> str:
     credential_count = int(llm_context.get("credential_count") or 0)
     if llm_context.get("error") == "direct_engine_timeout":
-        timeout_seconds = int(
-            llm_context.get("timeout_seconds") or DIRECT_ENGINE_TIMEOUT_SECONDS
-        )
         return (
-            "The engine reached the "
-            f"{human_duration(timeout_seconds * 1000)} safety limit, so Aelyx closed "
-            "the scan and returned a timeout report instead of leaving it running."
+            "The engine stayed active without returning a final answer, so Aelyx closed "
+            "the scan and returned a partial report instead of leaving it running."
         )
     if llm_context.get("error"):
         return (

@@ -158,7 +158,31 @@
             <span id="work-progress-label">0%</span>
           </div>
           <p id="work-detail">Free scan. Saved history after sign-in.</p>
-          <button class="work-cta" type="button" data-focus-target>URL</button>
+          <div class="scan-visual" aria-hidden="true">
+            <div class="scan-visual-orbit">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div class="scan-visual-bars">
+              <span></span>
+              <span></span>
+              <span></span>
+              <span></span>
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div class="scan-visual-wave">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+          </div>
+          <div class="work-actions">
+            <button class="work-cta" type="button" data-focus-target>URL</button>
+            <button class="work-stop" type="button" data-stop-scan hidden>Stop scan</button>
+          </div>
           <ol id="work-steps" class="work-steps" aria-label="Work steps">
             <li class="waiting">
               <span class="work-step-marker" aria-hidden="true"></span>
@@ -584,6 +608,14 @@
           <span></span>
           <span></span>
         </div>
+        <div class="thinking-graph" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
         <div class="thinking-stats">
           <div><span>Target</span><strong id="thinking-target">-</strong></div>
           <div><span>Engine</span><strong id="thinking-engine">Aelyx</strong></div>
@@ -598,10 +630,11 @@
           <li>Findings</li>
           <li>Report</li>
         </ol>
+        <button class="thinking-stop" type="button" data-stop-scan>Stop scan</button>
       </section>
     </div>
 
     <script src="https://accounts.google.com/gsi/client?hl=en" async defer></script>
-    <script src="/static/app.js?v=scan-motion-2"></script>
+    <script src="/static/app.js?v=scan-motion-3"></script>
   </body>
 </html>
