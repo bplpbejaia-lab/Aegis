@@ -1339,7 +1339,9 @@ def reserve_usage(user: dict[str, Any] | None, ip_address: str, engine: str) -> 
                 INSERT INTO usage_counters (subject, engine, period_key, count, created_at, updated_at)
                 VALUES (%s, %s, %s, 1, %s, %s)
                 ON CONFLICT(subject, engine, period_key)
-                DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
+                DO UPDATE SET
+                    count = usage_counters.count + 1,
+                    updated_at = excluded.updated_at
                 """,
                 (subject, engine, key, now, now),
             )

@@ -2393,6 +2393,86 @@ button:disabled {
   line-height: 1.45;
 }
 
+.thinking-note {
+  grid-column: 2;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(30, 215, 96, 0.1), rgba(255, 255, 255, 0.04)),
+    var(--panel-2);
+  padding: 12px;
+}
+
+.thinking-note span,
+.thinking-note small {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.thinking-note p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1.25;
+}
+
+.thinking-note small {
+  line-height: 1.35;
+  text-transform: none;
+}
+
+.thinking-signal {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.thinking-signal span {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-3);
+}
+
+.thinking-signal span::before {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #fff2a6);
+  content: "";
+  animation: signal-sweep 1.8s ease-in-out infinite;
+}
+
+.thinking-signal span:nth-child(2)::before {
+  animation-delay: 0.18s;
+}
+
+.thinking-signal span:nth-child(3)::before {
+  animation-delay: 0.36s;
+}
+
+.thinking-signal span:nth-child(4)::before {
+  animation-delay: 0.54s;
+}
+
+@keyframes signal-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  52%,
+  100% {
+    transform: translateX(250%);
+  }
+}
+
 .thinking-stats {
   grid-column: 1 / -1;
   display: grid;
@@ -3158,6 +3238,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .thinking-note,
+  .thinking-signal {
+    grid-column: 1 / -1;
+  }
+
   .profile-card {
     grid-template-columns: 36px;
     justify-content: center;
@@ -3495,6 +3580,11 @@ button:disabled {
 
   .thinking-orbit {
     justify-self: center;
+  }
+
+  .thinking-note,
+  .thinking-signal {
+    grid-column: 1 / -1;
   }
 
   .thinking-stages {
@@ -3997,6 +4087,7 @@ body::after {
 .capability-grid article,
 .work-steps li,
 .thinking-stats div,
+.thinking-note,
 .thinking-stages li,
 .fact,
 .facts-panel .panel-placeholder,

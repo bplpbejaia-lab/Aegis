@@ -102,6 +102,10 @@ const thinkingElapsed = document.querySelector("#thinking-elapsed");
 const thinkingQuota = document.querySelector("#thinking-quota");
 const thinkingProgressBar = document.querySelector("#thinking-progress-bar");
 const thinkingStages = document.querySelector("#thinking-stages");
+const thinkingPhase = document.querySelector("#thinking-phase");
+const thinkingQuote = document.querySelector("#thinking-quote");
+const thinkingExplain = document.querySelector("#thinking-explain");
+const thinkingSignal = document.querySelector(".thinking-signal");
 
 const traceItems = new Map();
 const SESSION_KEY = "aegisSessionToken";
@@ -114,8 +118,84 @@ const ADMIN_PERIOD_LABELS = {
   month: "Last 30 days",
   all: "All time",
 };
+const THINKING_MOOD_MS = 3400;
+const THINKING_MOODS = [
+  {
+    phase: "Scope gate",
+    title: "Checking permission",
+    detail: "Confirming mode, target, and authorization before any deeper work.",
+    quote: "Measure twice. Scan once.",
+    explain: "A safe scan starts by proving the target and the allowed depth.",
+  },
+  {
+    phase: "DNS map",
+    title: "Mapping the edge",
+    detail: "Resolving names and looking for the first public boundary.",
+    quote: "Every surface starts with an address.",
+    explain: "DNS, redirects, and final URLs help the report stay grounded.",
+  },
+  {
+    phase: "HTTP signals",
+    title: "Reading headers",
+    detail: "Collecting status, redirects, content hints, and security headers.",
+    quote: "Headers tell the first honest story.",
+    explain: "The agent compares what the server says with what the browser receives.",
+  },
+  {
+    phase: "TLS posture",
+    title: "Checking transport",
+    detail: "Looking at HTTPS, certificate shape, and secure delivery hints.",
+    quote: "Trust begins before the page loads.",
+    explain: "Transport evidence helps separate cosmetic risk from real exposure.",
+  },
+  {
+    phase: "Page surface",
+    title: "Inspecting the page",
+    detail: "Reading forms, scripts, metadata, and visible app structure.",
+    quote: "Small clues make strong findings.",
+    explain: "The scan looks for user-facing inputs and exposed implementation details.",
+  },
+  {
+    phase: "Risk lens",
+    title: "Classifying signals",
+    detail: "Grouping evidence into critical, high, medium, and low risk.",
+    quote: "Noise is not a finding.",
+    explain: "Only evidence that changes security posture should become a finding.",
+  },
+  {
+    phase: "Proof mode",
+    title: "Keeping it reversible",
+    detail: "Staying within proof boundaries and avoiding destructive actions.",
+    quote: "Proof should be clean.",
+    explain: "Authorized validation still needs a controlled, reversible footprint.",
+  },
+  {
+    phase: "Hosting fit",
+    title: "Building fixes",
+    detail: "Turning technical signals into practical hosting and hardening steps.",
+    quote: "A good fix is one you can ship.",
+    explain: "Recommendations are ranked by likely impact and setup effort.",
+  },
+  {
+    phase: "Evidence pass",
+    title: "Cross-checking notes",
+    detail: "Comparing findings against the collected facts before final output.",
+    quote: "Evidence beats guesses.",
+    explain: "The report favors repeatable observations over vague warnings.",
+  },
+  {
+    phase: "Report craft",
+    title: "Writing the report",
+    detail: "Preparing a readable summary, impact notes, and next actions.",
+    quote: "Clear reports get fixed faster.",
+    explain: "The last pass makes the output useful for both technical and business readers.",
+  },
+];
 let runStartedAt = 0;
 let timer = null;
+let thinkingMoodTimer = null;
+let thinkingMoodIndex = 0;
+let thinkingHasServerStep = false;
 let currentReport = null;
 let currentUser = null;
 let appConfig = { plans: [], google_client_id: "", proof_mode_launched: false };
@@ -1932,21 +2012,74 @@ function showThinkingModal(target, engine) {
   thinkingDetail.textContent = "Preparing.";
   thinkingProgressBar?.style.setProperty("--thinking-progress", "8%");
   setThinkingStage(0);
+  thinkingHasServerStep = false;
+  startThinkingMood();
 }
 
 function hideThinkingModal() {
   if (!thinkingModal) return;
+  stopThinkingMood();
   thinkingModal.hidden = true;
 }
 
 function updateThinkingFromStep(step) {
   if (!thinkingModal || thinkingModal.hidden) return;
+  thinkingHasServerStep = true;
   thinkingTitle.textContent = step.status === "complete" ? "Evidence captured" : step.title;
   thinkingDetail.textContent = step.detail || "Working.";
+  applyThinkingMood(moodForStep(step.id));
   const stageIndex = stageIndexForStep(step.id);
   setThinkingStage(stageIndex);
   const progress = Number(String(workProgressLabel.textContent || "0").replace("%", "")) || 0;
   thinkingProgressBar?.style.setProperty("--thinking-progress", `${Math.max(8, progress)}%`);
+}
+
+function startThinkingMood() {
+  stopThinkingMood();
+  thinkingMoodIndex = 0;
+  applyThinkingMood(THINKING_MOODS[thinkingMoodIndex]);
+  thinkingMoodTimer = window.setInterval(() => {
+    if (!thinkingModal || thinkingModal.hidden) {
+      stopThinkingMood();
+      return;
+    }
+    thinkingMoodIndex = (thinkingMoodIndex + 1) % THINKING_MOODS.length;
+    applyThinkingMood(THINKING_MOODS[thinkingMoodIndex]);
+  }, THINKING_MOOD_MS);
+}
+
+function stopThinkingMood() {
+  if (!thinkingMoodTimer) return;
+  window.clearInterval(thinkingMoodTimer);
+  thinkingMoodTimer = null;
+}
+
+function applyThinkingMood(mood) {
+  if (!mood) return;
+  if (!thinkingHasServerStep) {
+    if (thinkingTitle) thinkingTitle.textContent = mood.title;
+    if (thinkingDetail) thinkingDetail.textContent = mood.detail;
+  }
+  if (thinkingPhase) thinkingPhase.textContent = mood.phase;
+  if (thinkingQuote) thinkingQuote.textContent = `"${mood.quote}"`;
+  if (thinkingExplain) thinkingExplain.textContent = mood.explain;
+  thinkingSignal?.style.setProperty("--signal-step", `${(thinkingMoodIndex % 4) + 1}`);
+}
+
+function moodForStep(stepId) {
+  const map = {
+    scope: 0,
+    dns: 1,
+    http: 2,
+    tls: 3,
+    surface: 4,
+    aegis_direct: 6,
+    sheepstealer_direct: 6,
+    local_report: 8,
+    llm: 9,
+  };
+  thinkingMoodIndex = map[stepId] ?? thinkingMoodIndex;
+  return THINKING_MOODS[thinkingMoodIndex] || THINKING_MOODS[0];
 }
 
 function renderQuota(quota) {
